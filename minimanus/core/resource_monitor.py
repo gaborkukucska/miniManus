@@ -4,55 +4,57 @@
 """
 Resource Monitor for miniManus
 
-This module implements the Resource Monitor component, which tracks memory and CPU usage,
-implements adaptive resource allocation, provides early warnings before resource exhaustion,
-and triggers cleanup procedures when needed.
+This module implements the Resource Monitor component, which monitors system resources
+and provides resource management capabilities for the miniManus framework.
 """
 
 import os
 import sys
-import time
 import logging
+import time
 import threading
 import psutil
-from typing import Dict, List, Optional, Any, Callable, Tuple
+from typing import Dict, List, Optional, Any, Callable, Union
 from enum import Enum, auto
 
 # Import local modules
 try:
     from ..core.event_bus import EventBus, Event, EventPriority
+    from ..core.error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
+    from ..core.config_manager import ConfigurationManager
 except ImportError:
     # For standalone testing
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     from core.event_bus import EventBus, Event, EventPriority
+    from core.error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
+    from core.config_manager import ConfigurationManager
 
 logger = logging.getLogger("miniManus.ResourceMonitor")
 
-class ResourceWarningLevel(Enum):
-    """Warning levels for resource usage."""
-    NORMAL = auto()
-    WARNING = auto()
-    CRITICAL = auto()
-    EMERGENCY = auto()
-
 class ResourceType(Enum):
-    """Types of resources to monitor."""
+    """Resource types."""
     MEMORY = auto()
     CPU = auto()
     STORAGE = auto()
     BATTERY = auto()
 
+class ResourceWarningLevel(Enum):
+    """Resource warning severity levels."""
+    INFO = auto()
+    WARNING = auto()
+    CRITICAL = auto()
+
 class ResourceMonitor:
     """
-    ResourceMonitor tracks system resource usage and provides warnings when thresholds are exceeded.
+    ResourceMonitor monitors system resources and provides resource management capabilities.
     
     It handles:
     - Memory usage monitoring
     - CPU usage monitoring
-    - Storage space monitoring
-    - Battery level monitoring (if available)
-    - Warning notifications when thresholds are exceeded
-    - Triggering cleanup procedures when needed
+    - Storage usage monitoring
+    - Battery status monitoring
+    - Resource cleanup
+    - Resource warning notifications
     """
     
     _instance = None  # Singleton instance
@@ -71,52 +73,59 @@ class ResourceMonitor:
         
         self.logger = logger
         self.event_bus = EventBus.get_instance()
+        self.error_handler = ErrorHandler.get_instance()
+        self.config_manager = ConfigurationManager.get_instance()
         
-        # Default thresholds (will be updated from config)
-        self.thresholds = {
-            ResourceType.MEMORY: {
-                ResourceWarningLevel.WARNING: 30,    # 30% usage
-                ResourceWarningLevel.CRITICAL: 40,   # 40% usage
-                ResourceWarningLevel.EMERGENCY: 45,  # 45% usage (Android OOM killer at ~50%)
-            },
-            ResourceType.CPU: {
-                ResourceWarningLevel.WARNING: 70,    # 70% usage
-                ResourceWarningLevel.CRITICAL: 85,   # 85% usage
-                ResourceWarningLevel.EMERGENCY: 95,  # 95% usage
-            },
-            ResourceType.STORAGE: {
-                ResourceWarningLevel.WARNING: 80,    # 80% usage
-                ResourceWarningLevel.CRITICAL: 90,   # 90% usage
-                ResourceWarningLevel.EMERGENCY: 95,  # 95% usage
-            },
-            ResourceType.BATTERY: {
-                ResourceWarningLevel.WARNING: 30,    # 30% remaining
-                ResourceWarningLevel.CRITICAL: 15,   # 15% remaining
-                ResourceWarningLevel.EMERGENCY: 5,   # 5% remaining
-            },
-        }
+        # Resource thresholds
+        self.memory_warning_threshold = self.config_manager.get_config(
+            "resources.memory_warning_threshold", 
+            80
+        )  # Percentage
+        self.memory_critical_threshold = self.config_manager.get_config(
+            "resources.memory_critical_threshold", 
+            90
+        )  # Percentage
+        self.cpu_warning_threshold = self.config_manager.get_config(
+            "resources.cpu_warning_threshold", 
+            80
+        )  # Percentage
+        self.cpu_critical_threshold = self.config_manager.get_config(
+            "resources.cpu_critical_threshold", 
+            90
+        )  # Percentage
+        self.storage_warning_threshold = self.config_manager.get_config(
+            "resources.storage_warning_threshold", 
+            80
+        )  # Percentage
+        self.storage_critical_threshold = self.config_manager.get_config(
+            "resources.storage_critical_threshold", 
+            90
+        )  # Percentage
+        self.battery_warning_threshold = self.config_manager.get_config(
+            "resources.battery_warning_threshold", 
+            20
+        )  # Percentage
+        self.battery_critical_threshold = self.config_manager.get_config(
+            "resources.battery_critical_threshold", 
+            10
+        )  # Percentage
         
-        # Current warning levels
-        self.current_levels = {
-            ResourceType.MEMORY: ResourceWarningLevel.NORMAL,
-            ResourceType.CPU: ResourceWarningLevel.NORMAL,
-            ResourceType.STORAGE: ResourceWarningLevel.NORMAL,
-            ResourceType.BATTERY: ResourceWarningLevel.NORMAL,
-        }
+        # Monitoring intervals
+        self.monitoring_interval = self.config_manager.get_config(
+            "resources.monitoring_interval", 
+            60
+        )  # Seconds
         
-        # Monitoring state
-        self.is_running = False
-        self.monitor_thread = None
-        self.monitor_interval = 5.0  # seconds
-        self.cleanup_callbacks = {
-            ResourceType.MEMORY: [],
-            ResourceType.CPU: [],
-            ResourceType.STORAGE: [],
-            ResourceType.BATTERY: [],
-        }
+        # Cleanup callbacks
+        self.cleanup_callbacks = []
         
-        # Battery monitoring capability
+        # Monitoring thread
+        self.monitoring_thread = None
+        self.stop_monitoring = threading.Event()
+        
+        # Feature availability
         self.battery_monitoring_available = self._check_battery_monitoring()
+        self.cpu_monitoring_available = self._check_cpu_monitoring()
         
         self.logger.info("ResourceMonitor initialized")
     
@@ -130,297 +139,321 @@ class ResourceMonitor:
         try:
             battery = psutil.sensors_battery()
             return battery is not None
-        except (AttributeError, NotImplementedError):
+        except (AttributeError, PermissionError, FileNotFoundError):
+            self.logger.warning("Battery monitoring not available due to permissions or missing hardware")
             return False
     
-    def update_thresholds(self, resource_type: ResourceType, 
-                         warning: Optional[float] = None, 
-                         critical: Optional[float] = None,
-                         emergency: Optional[float] = None) -> None:
+    def _check_cpu_monitoring(self) -> bool:
         """
-        Update thresholds for a specific resource type.
+        Check if CPU monitoring is available.
         
-        Args:
-            resource_type: Type of resource to update thresholds for
-            warning: New warning threshold (percentage)
-            critical: New critical threshold (percentage)
-            emergency: New emergency threshold (percentage)
-        """
-        if warning is not None:
-            self.thresholds[resource_type][ResourceWarningLevel.WARNING] = warning
-        
-        if critical is not None:
-            self.thresholds[resource_type][ResourceWarningLevel.CRITICAL] = critical
-        
-        if emergency is not None:
-            self.thresholds[resource_type][ResourceWarningLevel.EMERGENCY] = emergency
-        
-        self.logger.debug(f"Updated thresholds for {resource_type.name}")
-    
-    def register_cleanup_callback(self, resource_type: ResourceType, 
-                                 callback: Callable[[ResourceWarningLevel], None]) -> None:
-        """
-        Register a callback to be called when cleanup is needed for a resource.
-        
-        Args:
-            resource_type: Type of resource to register callback for
-            callback: Function to call when cleanup is needed
-        """
-        self.cleanup_callbacks[resource_type].append(callback)
-        self.logger.debug(f"Registered cleanup callback for {resource_type.name}")
-    
-    def unregister_cleanup_callback(self, resource_type: ResourceType, 
-                                   callback: Callable[[ResourceWarningLevel], None]) -> bool:
-        """
-        Unregister a cleanup callback.
-        
-        Args:
-            resource_type: Type of resource to unregister callback for
-            callback: Function to unregister
-            
         Returns:
-            True if unregistered successfully, False otherwise
+            True if CPU monitoring is available, False otherwise
         """
-        if callback in self.cleanup_callbacks[resource_type]:
-            self.cleanup_callbacks[resource_type].remove(callback)
-            self.logger.debug(f"Unregistered cleanup callback for {resource_type.name}")
+        try:
+            # Just try to access /proc/stat directly to check permissions
+            with open('/proc/stat', 'rb') as f:
+                pass
             return True
-        return False
+        except (PermissionError, FileNotFoundError):
+            self.logger.warning("CPU monitoring not available due to permissions or missing hardware")
+            return False
     
-    def get_memory_usage(self) -> Tuple[float, float]:
+    def get_memory_usage(self) -> Dict[str, Any]:
         """
         Get current memory usage.
         
         Returns:
-            Tuple of (used_percent, available_bytes)
+            Dictionary with memory usage information
         """
-        mem = psutil.virtual_memory()
-        return mem.percent, mem.available
+        try:
+            memory = psutil.virtual_memory()
+            return {
+                "total": memory.total,
+                "available": memory.available,
+                "used": memory.used,
+                "percent": memory.percent
+            }
+        except (AttributeError, PermissionError, FileNotFoundError):
+            self.logger.warning("Memory usage monitoring not available due to permissions")
+            return {
+                "total": 0,
+                "available": 0,
+                "used": 0,
+                "percent": 0
+            }
     
-    def get_cpu_usage(self) -> float:
+    def get_cpu_usage(self) -> Dict[str, Any]:
         """
         Get current CPU usage.
         
         Returns:
-            CPU usage percentage
+            Dictionary with CPU usage information
         """
-        return psutil.cpu_percent(interval=0.1)
+        try:
+            if not self.cpu_monitoring_available:
+                return {
+                    "percent": 0,
+                    "count": 1
+                }
+            
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            cpu_count = psutil.cpu_count()
+            return {
+                "percent": cpu_percent,
+                "count": cpu_count
+            }
+        except (AttributeError, PermissionError, FileNotFoundError):
+            self.logger.warning("CPU usage monitoring not available due to permissions")
+            self.cpu_monitoring_available = False
+            return {
+                "percent": 0,
+                "count": 1
+            }
     
-    def get_storage_usage(self) -> Tuple[float, float]:
+    def get_storage_usage(self) -> Dict[str, Any]:
         """
-        Get current storage usage for the Termux data directory.
+        Get current storage usage.
         
         Returns:
-            Tuple of (used_percent, free_bytes)
+            Dictionary with storage usage information
         """
-        # Get storage info for the directory containing user data
-        home_dir = os.environ.get('HOME', '.')
-        disk = psutil.disk_usage(home_dir)
-        return disk.percent, disk.free
+        try:
+            storage = psutil.disk_usage(os.path.expanduser("~"))
+            return {
+                "total": storage.total,
+                "used": storage.used,
+                "free": storage.free,
+                "percent": storage.percent
+            }
+        except (AttributeError, PermissionError, FileNotFoundError):
+            self.logger.warning("Storage usage monitoring not available due to permissions")
+            return {
+                "total": 0,
+                "used": 0,
+                "free": 0,
+                "percent": 0
+            }
     
-    def get_battery_status(self) -> Tuple[Optional[float], Optional[bool]]:
+    def get_battery_status(self) -> Optional[Dict[str, Any]]:
         """
         Get current battery status.
         
         Returns:
-            Tuple of (percent, is_charging) or (None, None) if not available
+            Dictionary with battery status information or None if not available
         """
         if not self.battery_monitoring_available:
-            return None, None
+            return None
         
         try:
             battery = psutil.sensors_battery()
-            if battery:
-                return battery.percent, battery.power_plugged
-            return None, None
-        except (AttributeError, NotImplementedError):
-            self.battery_monitoring_available = False
-            return None, None
-    
-    def get_resource_status(self) -> Dict[ResourceType, Dict[str, Any]]:
-        """
-        Get status of all monitored resources.
-        
-        Returns:
-            Dictionary with status of all resources
-        """
-        status = {}
-        
-        # Memory status
-        mem_percent, mem_available = self.get_memory_usage()
-        status[ResourceType.MEMORY] = {
-            "percent": mem_percent,
-            "available": mem_available,
-            "warning_level": self.current_levels[ResourceType.MEMORY].name,
-        }
-        
-        # CPU status
-        cpu_percent = self.get_cpu_usage()
-        status[ResourceType.CPU] = {
-            "percent": cpu_percent,
-            "warning_level": self.current_levels[ResourceType.CPU].name,
-        }
-        
-        # Storage status
-        storage_percent, storage_free = self.get_storage_usage()
-        status[ResourceType.STORAGE] = {
-            "percent": storage_percent,
-            "free": storage_free,
-            "warning_level": self.current_levels[ResourceType.STORAGE].name,
-        }
-        
-        # Battery status
-        if self.battery_monitoring_available:
-            battery_percent, is_charging = self.get_battery_status()
-            status[ResourceType.BATTERY] = {
-                "percent": battery_percent,
-                "is_charging": is_charging,
-                "warning_level": self.current_levels[ResourceType.BATTERY].name,
+            if battery is None:
+                return None
+            
+            return {
+                "percent": battery.percent,
+                "power_plugged": battery.power_plugged,
+                "seconds_left": battery.secsleft if battery.secsleft != -1 else None
             }
-        
-        return status
+        except (AttributeError, PermissionError, FileNotFoundError):
+            self.battery_monitoring_available = False
+            self.logger.warning("Battery monitoring became unavailable")
+            return None
     
-    def check_resource_levels(self) -> Dict[ResourceType, ResourceWarningLevel]:
+    def register_cleanup_callback(self, callback: Callable[[], None]) -> None:
         """
-        Check current resource levels and determine warning levels.
+        Register a callback for resource cleanup.
+        
+        Args:
+            callback: Callback function to register
+        """
+        self.cleanup_callbacks.append(callback)
+        self.logger.debug(f"Registered cleanup callback: {callback.__name__}")
+    
+    def unregister_cleanup_callback(self, callback: Callable[[], None]) -> bool:
+        """
+        Unregister a cleanup callback.
+        
+        Args:
+            callback: Callback function to unregister
+            
+        Returns:
+            True if unregistered, False if not found
+        """
+        if callback in self.cleanup_callbacks:
+            self.cleanup_callbacks.remove(callback)
+            self.logger.debug(f"Unregistered cleanup callback: {callback.__name__}")
+            return True
+        return False
+    
+    def check_resources(self) -> List[Dict[str, Any]]:
+        """
+        Check resource usage and trigger warnings if needed.
         
         Returns:
-            Dictionary mapping resource types to warning levels
+            List of resource warnings
         """
-        new_levels = {}
+        warnings = []
         
         # Check memory
-        mem_percent, _ = self.get_memory_usage()
-        if mem_percent >= self.thresholds[ResourceType.MEMORY][ResourceWarningLevel.EMERGENCY]:
-            new_levels[ResourceType.MEMORY] = ResourceWarningLevel.EMERGENCY
-        elif mem_percent >= self.thresholds[ResourceType.MEMORY][ResourceWarningLevel.CRITICAL]:
-            new_levels[ResourceType.MEMORY] = ResourceWarningLevel.CRITICAL
-        elif mem_percent >= self.thresholds[ResourceType.MEMORY][ResourceWarningLevel.WARNING]:
-            new_levels[ResourceType.MEMORY] = ResourceWarningLevel.WARNING
+        memory = self.get_memory_usage()
+        if memory["percent"] >= self.memory_critical_threshold:
+            level = ResourceWarningLevel.CRITICAL
+        elif memory["percent"] >= self.memory_warning_threshold:
+            level = ResourceWarningLevel.WARNING
         else:
-            new_levels[ResourceType.MEMORY] = ResourceWarningLevel.NORMAL
+            level = ResourceWarningLevel.INFO
+        
+        if level != ResourceWarningLevel.INFO:
+            warning = {
+                "type": ResourceType.MEMORY,
+                "level": level,
+                "value": memory["percent"],
+                "threshold": self.memory_critical_threshold if level == ResourceWarningLevel.CRITICAL else self.memory_warning_threshold,
+                "message": f"Memory usage is {memory['percent']}%"
+            }
+            warnings.append(warning)
+            self._publish_resource_warning(warning)
         
         # Check CPU
-        cpu_percent = self.get_cpu_usage()
-        if cpu_percent >= self.thresholds[ResourceType.CPU][ResourceWarningLevel.EMERGENCY]:
-            new_levels[ResourceType.CPU] = ResourceWarningLevel.EMERGENCY
-        elif cpu_percent >= self.thresholds[ResourceType.CPU][ResourceWarningLevel.CRITICAL]:
-            new_levels[ResourceType.CPU] = ResourceWarningLevel.CRITICAL
-        elif cpu_percent >= self.thresholds[ResourceType.CPU][ResourceWarningLevel.WARNING]:
-            new_levels[ResourceType.CPU] = ResourceWarningLevel.WARNING
-        else:
-            new_levels[ResourceType.CPU] = ResourceWarningLevel.NORMAL
+        if self.cpu_monitoring_available:
+            cpu = self.get_cpu_usage()
+            if cpu["percent"] >= self.cpu_critical_threshold:
+                level = ResourceWarningLevel.CRITICAL
+            elif cpu["percent"] >= self.cpu_warning_threshold:
+                level = ResourceWarningLevel.WARNING
+            else:
+                level = ResourceWarningLevel.INFO
+            
+            if level != ResourceWarningLevel.INFO:
+                warning = {
+                    "type": ResourceType.CPU,
+                    "level": level,
+                    "value": cpu["percent"],
+                    "threshold": self.cpu_critical_threshold if level == ResourceWarningLevel.CRITICAL else self.cpu_warning_threshold,
+                    "message": f"CPU usage is {cpu['percent']}%"
+                }
+                warnings.append(warning)
+                self._publish_resource_warning(warning)
         
         # Check storage
-        storage_percent, _ = self.get_storage_usage()
-        if storage_percent >= self.thresholds[ResourceType.STORAGE][ResourceWarningLevel.EMERGENCY]:
-            new_levels[ResourceType.STORAGE] = ResourceWarningLevel.EMERGENCY
-        elif storage_percent >= self.thresholds[ResourceType.STORAGE][ResourceWarningLevel.CRITICAL]:
-            new_levels[ResourceType.STORAGE] = ResourceWarningLevel.CRITICAL
-        elif storage_percent >= self.thresholds[ResourceType.STORAGE][ResourceWarningLevel.WARNING]:
-            new_levels[ResourceType.STORAGE] = ResourceWarningLevel.WARNING
+        storage = self.get_storage_usage()
+        if storage["percent"] >= self.storage_critical_threshold:
+            level = ResourceWarningLevel.CRITICAL
+        elif storage["percent"] >= self.storage_warning_threshold:
+            level = ResourceWarningLevel.WARNING
         else:
-            new_levels[ResourceType.STORAGE] = ResourceWarningLevel.NORMAL
+            level = ResourceWarningLevel.INFO
+        
+        if level != ResourceWarningLevel.INFO:
+            warning = {
+                "type": ResourceType.STORAGE,
+                "level": level,
+                "value": storage["percent"],
+                "threshold": self.storage_critical_threshold if level == ResourceWarningLevel.CRITICAL else self.storage_warning_threshold,
+                "message": f"Storage usage is {storage['percent']}%"
+            }
+            warnings.append(warning)
+            self._publish_resource_warning(warning)
         
         # Check battery
         if self.battery_monitoring_available:
-            battery_percent, is_charging = self.get_battery_status()
-            if battery_percent is not None:
-                # Only check battery level if not charging
-                if not is_charging:
-                    if battery_percent <= self.thresholds[ResourceType.BATTERY][ResourceWarningLevel.EMERGENCY]:
-                        new_levels[ResourceType.BATTERY] = ResourceWarningLevel.EMERGENCY
-                    elif battery_percent <= self.thresholds[ResourceType.BATTERY][ResourceWarningLevel.CRITICAL]:
-                        new_levels[ResourceType.BATTERY] = ResourceWarningLevel.CRITICAL
-                    elif battery_percent <= self.thresholds[ResourceType.BATTERY][ResourceWarningLevel.WARNING]:
-                        new_levels[ResourceType.BATTERY] = ResourceWarningLevel.WARNING
-                    else:
-                        new_levels[ResourceType.BATTERY] = ResourceWarningLevel.NORMAL
+            battery = self.get_battery_status()
+            if battery and not battery["power_plugged"]:
+                if battery["percent"] <= self.battery_critical_threshold:
+                    level = ResourceWarningLevel.CRITICAL
+                elif battery["percent"] <= self.battery_warning_threshold:
+                    level = ResourceWarningLevel.WARNING
                 else:
-                    new_levels[ResourceType.BATTERY] = ResourceWarningLevel.NORMAL
+                    level = ResourceWarningLevel.INFO
+                
+                if level != ResourceWarningLevel.INFO:
+                    warning = {
+                        "type": ResourceType.BATTERY,
+                        "level": level,
+                        "value": battery["percent"],
+                        "threshold": self.battery_critical_threshold if level == ResourceWarningLevel.CRITICAL else self.battery_warning_threshold,
+                        "message": f"Battery level is {battery['percent']}%"
+                    }
+                    warnings.append(warning)
+                    self._publish_resource_warning(warning)
         
-        return new_levels
+        return warnings
     
-    def _handle_warning_level_change(self, resource_type: ResourceType, 
-                                    old_level: ResourceWarningLevel, 
-                                    new_level: ResourceWarningLevel) -> None:
+    def _publish_resource_warning(self, warning: Dict[str, Any]) -> None:
         """
-        Handle a change in warning level for a resource.
+        Publish a resource warning event.
         
         Args:
-            resource_type: Type of resource with changed warning level
-            old_level: Previous warning level
-            new_level: New warning level
+            warning: Warning information
         """
-        # Only handle increases in warning level or return to normal
-        if new_level.value > old_level.value or new_level == ResourceWarningLevel.NORMAL:
-            # Publish event
-            self.event_bus.publish_event(
-                f"resource.{resource_type.name.lower()}.{new_level.name.lower()}",
-                {
-                    "resource_type": resource_type,
-                    "warning_level": new_level,
-                    "previous_level": old_level,
-                },
-                EventPriority.HIGH if new_level == ResourceWarningLevel.EMERGENCY else EventPriority.NORMAL
-            )
-            
-            # Call cleanup callbacks if warning level is not NORMAL
-            if new_level != ResourceWarningLevel.NORMAL:
-                for callback in self.cleanup_callbacks[resource_type]:
-                    try:
-                        callback(new_level)
-                    except Exception as e:
-                        self.logger.error(f"Error in cleanup callback for {resource_type.name}: {str(e)}")
+        self.event_bus.publish_event("resources.warning", warning)
+        
+        level_name = warning["level"].name.lower()
+        resource_name = warning["type"].name.lower()
+        self.logger.warning(f"Resource {level_name} for {resource_name}: {warning['message']}")
+        
+        # Trigger cleanup if critical
+        if warning["level"] == ResourceWarningLevel.CRITICAL:
+            self._trigger_cleanup(warning["type"])
     
-    def _monitor_resources(self) -> None:
-        """Monitor resources periodically."""
-        while self.is_running:
+    def _trigger_cleanup(self, resource_type: ResourceType) -> None:
+        """
+        Trigger resource cleanup.
+        
+        Args:
+            resource_type: Type of resource to clean up
+        """
+        self.logger.info(f"Triggering cleanup for {resource_type.name}")
+        
+        # Call cleanup callbacks
+        for callback in self.cleanup_callbacks:
             try:
-                # Check resource levels
-                new_levels = self.check_resource_levels()
-                
-                # Handle changes in warning levels
-                for resource_type, new_level in new_levels.items():
-                    old_level = self.current_levels[resource_type]
-                    if new_level != old_level:
-                        self._handle_warning_level_change(resource_type, old_level, new_level)
-                        self.current_levels[resource_type] = new_level
-                
-                # Adjust monitoring interval based on resource pressure
-                max_level = max(level.value for level in new_levels.values())
-                if max_level >= ResourceWarningLevel.CRITICAL.value:
-                    # More frequent monitoring under pressure
-                    interval = 1.0
-                elif max_level >= ResourceWarningLevel.WARNING.value:
-                    interval = 2.0
-                else:
-                    interval = self.monitor_interval
-                
-                # Sleep until next check
-                time.sleep(interval)
-            
+                callback()
             except Exception as e:
-                self.logger.error(f"Error monitoring resources: {str(e)}")
-                time.sleep(5.0)  # Sleep longer on error
+                self.error_handler.handle_error(
+                    e, ErrorCategory.RESOURCE, ErrorSeverity.WARNING,
+                    {"action": "cleanup", "resource_type": resource_type.name}
+                )
+        
+        # Publish cleanup event
+        self.event_bus.publish_event("resources.cleanup", {
+            "type": resource_type.name
+        })
+    
+    def _monitoring_loop(self) -> None:
+        """Resource monitoring loop."""
+        while not self.stop_monitoring.is_set():
+            try:
+                self.check_resources()
+            except Exception as e:
+                self.error_handler.handle_error(
+                    e, ErrorCategory.RESOURCE, ErrorSeverity.WARNING,
+                    {"action": "monitoring_loop"}
+                )
+            
+            # Wait for next check
+            self.stop_monitoring.wait(self.monitoring_interval)
     
     def startup(self) -> None:
-        """Start resource monitoring."""
-        if self.is_running:
-            self.logger.warning("ResourceMonitor already running")
-            return
+        """Start the resource monitor."""
+        # Start monitoring thread
+        self.stop_monitoring.clear()
+        self.monitoring_thread = threading.Thread(
+            target=self._monitoring_loop,
+            daemon=True,
+            name="ResourceMonitorThread"
+        )
+        self.monitoring_thread.start()
         
-        self.is_running = True
-        self.monitor_thread = threading.Thread(target=self._monitor_resources, daemon=True)
-        self.monitor_thread.start()
         self.logger.info("ResourceMonitor started")
     
     def shutdown(self) -> None:
-        """Stop resource monitoring."""
-        self.is_running = False
-        
-        if self.monitor_thread and self.monitor_thread.is_alive():
-            self.monitor_thread.join(timeout=2.0)
+        """Stop the resource monitor."""
+        # Stop monitoring thread
+        if self.monitoring_thread and self.monitoring_thread.is_alive():
+            self.stop_monitoring.set()
+            self.monitoring_thread.join(timeout=1.0)
         
         self.logger.info("ResourceMonitor stopped")
 
@@ -429,43 +462,37 @@ if __name__ == "__main__":
     # This is just for demonstration purposes
     logging.basicConfig(level=logging.INFO)
     
-    # Initialize EventBus first
+    # Initialize required components
     event_bus = EventBus.get_instance()
     event_bus.startup()
     
-    # Subscribe to resource events
-    def handle_resource_event(event):
-        print(f"Resource event: {event.event_type} - {event.data}")
+    error_handler = ErrorHandler.get_instance()
     
-    event_bus.subscribe("resource.memory.warning", handle_resource_event)
-    event_bus.subscribe("resource.memory.critical", handle_resource_event)
-    event_bus.subscribe("resource.memory.emergency", handle_resource_event)
+    config_manager = ConfigurationManager.get_instance()
     
-    # Initialize and start ResourceMonitor
-    monitor = ResourceMonitor.get_instance()
+    # Initialize ResourceMonitor
+    resource_monitor = ResourceMonitor.get_instance()
+    resource_monitor.startup()
     
-    # Register a cleanup callback
-    def memory_cleanup(warning_level):
-        print(f"Memory cleanup triggered at level: {warning_level.name}")
+    # Example usage
+    print(f"Memory usage: {resource_monitor.get_memory_usage()}")
+    print(f"CPU usage: {resource_monitor.get_cpu_usage()}")
+    print(f"Storage usage: {resource_monitor.get_storage_usage()}")
+    print(f"Battery status: {resource_monitor.get_battery_status()}")
     
-    monitor.register_cleanup_callback(ResourceType.MEMORY, memory_cleanup)
+    # Register cleanup callback
+    def cleanup_example():
+        print("Cleaning up resources...")
     
-    # Start monitoring
-    monitor.startup()
+    resource_monitor.register_cleanup_callback(cleanup_example)
     
-    # Print current resource status
-    status = monitor.get_resource_status()
-    for resource_type, info in status.items():
-        print(f"{resource_type.name}: {info}")
+    # Check resources
+    warnings = resource_monitor.check_resources()
+    print(f"Resource warnings: {warnings}")
     
-    # Run for a while
-    try:
-        print("Press Ctrl+C to stop...")
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass
+    # Wait a bit
+    time.sleep(5)
     
     # Shutdown
-    monitor.shutdown()
+    resource_monitor.shutdown()
     event_bus.shutdown()

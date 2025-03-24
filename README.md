@@ -41,7 +41,7 @@ pkg install python git
 
 3. Clone the repository:
 ```bash
-git clone https://github.com/gaborkukucska/miniManus.git
+git clone https://github.com/yourusername/miniManus.git
 cd miniManus
 ```
 
@@ -180,6 +180,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
-- Inspired and buil by the amazing Manus project guided by Gabby✌️
+- Inspired by the Manus project
 - Built for the Termux community
 - Special thanks to all the LLM API providers

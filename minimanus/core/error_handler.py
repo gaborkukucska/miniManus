@@ -4,18 +4,20 @@
 """
 Error Handler for miniManus
 
-This module implements the Error Handler component, which centralizes error management,
-implements graceful recovery strategies, provides user-friendly error messages,
-and logs errors for troubleshooting.
+This module implements the Error Handler component, which provides centralized
+error handling and logging capabilities for the miniManus framework.
 """
 
 import os
 import sys
 import logging
 import traceback
+import json
+import time
 import threading
-from typing import Dict, List, Optional, Any, Callable, Tuple
+from typing import Dict, List, Optional, Any, Callable, Union
 from enum import Enum, auto
+from pathlib import Path
 
 # Import local modules
 try:
@@ -27,34 +29,34 @@ except ImportError:
 
 logger = logging.getLogger("miniManus.ErrorHandler")
 
-class ErrorSeverity(Enum):
-    """Severity levels for errors."""
-    INFO = auto()      # Informational, not an error
-    WARNING = auto()   # Warning, operation can continue
-    ERROR = auto()     # Error, operation failed but system can continue
-    CRITICAL = auto()  # Critical error, system stability affected
-    FATAL = auto()     # Fatal error, system cannot continue
-
 class ErrorCategory(Enum):
-    """Categories of errors."""
-    SYSTEM = auto()    # System-level errors
-    API = auto()       # API-related errors
-    UI = auto()        # UI-related errors
-    CONFIG = auto()    # Configuration errors
-    RESOURCE = auto()  # Resource-related errors
-    PLUGIN = auto()    # Plugin-related errors
-    NETWORK = auto()   # Network-related errors
-    UNKNOWN = auto()   # Unknown errors
+    """Error categories."""
+    SYSTEM = auto()
+    API = auto()
+    UI = auto()
+    NETWORK = auto()
+    STORAGE = auto()
+    RESOURCE = auto()
+    PLUGIN = auto()
+    SECURITY = auto()
+    UNKNOWN = auto()
+
+class ErrorSeverity(Enum):
+    """Error severity levels."""
+    INFO = auto()
+    WARNING = auto()
+    ERROR = auto()
+    CRITICAL = auto()
 
 class ErrorHandler:
     """
-    ErrorHandler centralizes error management across the system.
+    ErrorHandler provides centralized error handling and logging capabilities.
     
     It handles:
-    - Error logging and categorization
-    - Error event publishing
-    - Recovery strategy selection
-    - User-friendly error message generation
+    - Error logging
+    - Error categorization
+    - Error notification
+    - Error recovery
     """
     
     _instance = None  # Singleton instance
@@ -74,283 +76,189 @@ class ErrorHandler:
         self.logger = logger
         self.event_bus = EventBus.get_instance()
         
-        # Error history (limited size)
+        # Error history
+        self.error_history: List[Dict[str, Any]] = []
         self.max_history_size = 100
-        self.error_history = []
-        self.history_lock = threading.RLock()
         
-        # Recovery strategies
-        self.recovery_strategies = {}
-        
-        # Error message templates
-        self.message_templates = {
-            ErrorCategory.SYSTEM: {
-                ErrorSeverity.INFO: "System information: {message}",
-                ErrorSeverity.WARNING: "System warning: {message}",
-                ErrorSeverity.ERROR: "System error: {message}. Please try again later.",
-                ErrorSeverity.CRITICAL: "Critical system error: {message}. Some features may be unavailable.",
-                ErrorSeverity.FATAL: "Fatal system error: {message}. Please restart the application.",
-            },
-            ErrorCategory.API: {
-                ErrorSeverity.INFO: "API information: {message}",
-                ErrorSeverity.WARNING: "API warning: {message}",
-                ErrorSeverity.ERROR: "API error: {message}. Please check your connection and try again.",
-                ErrorSeverity.CRITICAL: "Critical API error: {message}. Switching to fallback provider.",
-                ErrorSeverity.FATAL: "Fatal API error: {message}. No providers available.",
-            },
-            ErrorCategory.UI: {
-                ErrorSeverity.INFO: "UI information: {message}",
-                ErrorSeverity.WARNING: "UI warning: {message}",
-                ErrorSeverity.ERROR: "UI error: {message}. Please try again.",
-                ErrorSeverity.CRITICAL: "Critical UI error: {message}. Resetting UI state.",
-                ErrorSeverity.FATAL: "Fatal UI error: {message}. Please restart the application.",
-            },
-            ErrorCategory.CONFIG: {
-                ErrorSeverity.INFO: "Configuration information: {message}",
-                ErrorSeverity.WARNING: "Configuration warning: {message}",
-                ErrorSeverity.ERROR: "Configuration error: {message}. Using default settings.",
-                ErrorSeverity.CRITICAL: "Critical configuration error: {message}. Some features may be unavailable.",
-                ErrorSeverity.FATAL: "Fatal configuration error: {message}. Please check your configuration file.",
-            },
-            ErrorCategory.RESOURCE: {
-                ErrorSeverity.INFO: "Resource information: {message}",
-                ErrorSeverity.WARNING: "Resource warning: {message}",
-                ErrorSeverity.ERROR: "Resource error: {message}. Some operations may be slower.",
-                ErrorSeverity.CRITICAL: "Critical resource error: {message}. Reducing functionality to conserve resources.",
-                ErrorSeverity.FATAL: "Fatal resource error: {message}. Cannot continue operation.",
-            },
-            ErrorCategory.PLUGIN: {
-                ErrorSeverity.INFO: "Plugin information: {message}",
-                ErrorSeverity.WARNING: "Plugin warning: {message}",
-                ErrorSeverity.ERROR: "Plugin error: {message}. Plugin functionality may be limited.",
-                ErrorSeverity.CRITICAL: "Critical plugin error: {message}. Disabling plugin.",
-                ErrorSeverity.FATAL: "Fatal plugin error: {message}. Please remove or update the plugin.",
-            },
-            ErrorCategory.NETWORK: {
-                ErrorSeverity.INFO: "Network information: {message}",
-                ErrorSeverity.WARNING: "Network warning: {message}",
-                ErrorSeverity.ERROR: "Network error: {message}. Please check your connection.",
-                ErrorSeverity.CRITICAL: "Critical network error: {message}. Switching to offline mode.",
-                ErrorSeverity.FATAL: "Fatal network error: {message}. Network functionality unavailable.",
-            },
-            ErrorCategory.UNKNOWN: {
-                ErrorSeverity.INFO: "Information: {message}",
-                ErrorSeverity.WARNING: "Warning: {message}",
-                ErrorSeverity.ERROR: "Error: {message}. Please try again.",
-                ErrorSeverity.CRITICAL: "Critical error: {message}. Please restart the application.",
-                ErrorSeverity.FATAL: "Fatal error: {message}. Please contact support.",
-            },
+        # Error callbacks
+        self.error_callbacks: Dict[ErrorCategory, List[Callable[[Exception, ErrorSeverity, Dict[str, Any]], None]]] = {
+            category: [] for category in ErrorCategory
         }
+        
+        # Register event handlers
+        self.event_bus.subscribe("error.occurred", self._handle_error_event)
         
         self.logger.info("ErrorHandler initialized")
     
-    def register_recovery_strategy(self, category: ErrorCategory, 
-                                  severity: ErrorSeverity,
-                                  strategy: Callable[[Dict[str, Any]], bool]) -> None:
+    def handle_error(self, error: Exception, category: ErrorCategory = ErrorCategory.UNKNOWN,
+                    severity: ErrorSeverity = ErrorSeverity.ERROR,
+                    context: Optional[Dict[str, Any]] = None) -> None:
         """
-        Register a recovery strategy for a specific error category and severity.
+        Handle an error.
+        
+        Args:
+            error: Exception to handle
+            category: Error category
+            severity: Error severity
+            context: Additional context information
+        """
+        # Create error record
+        error_record = {
+            "error": str(error),
+            "type": type(error).__name__,
+            "category": category.name,
+            "severity": severity.name,
+            "context": context or {},
+            "traceback": traceback.format_exc(),
+            "timestamp": time.time(),  # Current time
+        }
+        
+        # Add to history
+        self._add_to_history(error_record)
+        
+        # Log error
+        self._log_error(error_record)
+        
+        # Publish event
+        self.event_bus.publish_event("error.occurred", error_record)
+        
+        # Call callbacks
+        self._call_callbacks(error, category, severity, context or {})
+    
+    def get_error_history(self) -> List[Dict[str, Any]]:
+        """
+        Get error history.
+        
+        Returns:
+            List of error records
+        """
+        return self.error_history.copy()
+    
+    def clear_error_history(self) -> None:
+        """Clear error history."""
+        self.error_history.clear()
+        self.logger.debug("Error history cleared")
+    
+    def set_error_callback(self, category: ErrorCategory,
+                          callback: Callable[[Exception, ErrorSeverity, Dict[str, Any]], None]) -> None:
+        """
+        Set a callback for error handling.
         
         Args:
             category: Error category
-            severity: Error severity
-            strategy: Function to call for recovery, returns True if recovery successful
+            callback: Callback function
         """
-        key = (category, severity)
-        if key not in self.recovery_strategies:
-            self.recovery_strategies[key] = []
-        
-        self.recovery_strategies[key].append(strategy)
-        self.logger.debug(f"Registered recovery strategy for {category.name}/{severity.name}")
+        self.error_callbacks[category].append(callback)
+        self.logger.debug(f"Error callback set for category {category.name}")
     
-    def handle_error(self, error: Exception, category: ErrorCategory = ErrorCategory.UNKNOWN,
-                    severity: ErrorSeverity = ErrorSeverity.ERROR,
-                    context: Optional[Dict[str, Any]] = None) -> str:
+    def remove_error_callback(self, category: ErrorCategory,
+                             callback: Callable[[Exception, ErrorSeverity, Dict[str, Any]], None]) -> bool:
         """
-        Handle an error by logging it, publishing an event, and attempting recovery.
+        Remove an error callback.
         
         Args:
-            error: Exception that occurred
-            category: Category of the error
-            severity: Severity of the error
-            context: Additional context information
+            category: Error category
+            callback: Callback function
             
         Returns:
-            User-friendly error message
+            True if removed, False if not found
         """
-        context = context or {}
-        error_info = {
-            "error": error,
-            "error_type": type(error).__name__,
-            "message": str(error),
-            "traceback": traceback.format_exc(),
-            "category": category,
-            "severity": severity,
-            "context": context,
-            "timestamp": threading.Event().time(),  # Current time
-        }
-        
-        # Log the error
-        log_message = f"{category.name} {severity.name}: {str(error)}"
-        if severity == ErrorSeverity.FATAL:
-            self.logger.critical(log_message, exc_info=True)
-        elif severity == ErrorSeverity.CRITICAL:
-            self.logger.error(log_message, exc_info=True)
-        elif severity == ErrorSeverity.ERROR:
-            self.logger.error(log_message)
-        elif severity == ErrorSeverity.WARNING:
-            self.logger.warning(log_message)
-        else:
-            self.logger.info(log_message)
-        
-        # Add to error history
-        with self.history_lock:
-            self.error_history.append(error_info)
-            # Trim history if needed
-            if len(self.error_history) > self.max_history_size:
-                self.error_history = self.error_history[-self.max_history_size:]
-        
-        # Publish error event
-        event_priority = EventPriority.NORMAL
-        if severity == ErrorSeverity.FATAL:
-            event_priority = EventPriority.CRITICAL
-        elif severity == ErrorSeverity.CRITICAL:
-            event_priority = EventPriority.HIGH
-        
-        self.event_bus.publish_event(
-            f"error.{category.name.lower()}.{severity.name.lower()}",
-            error_info,
-            event_priority
-        )
-        
-        # Attempt recovery
-        self._attempt_recovery(error_info)
-        
-        # Generate user-friendly message
-        return self.get_user_message(error, category, severity)
-    
-    def _attempt_recovery(self, error_info: Dict[str, Any]) -> bool:
-        """
-        Attempt to recover from an error using registered strategies.
-        
-        Args:
-            error_info: Information about the error
-            
-        Returns:
-            True if recovery was successful, False otherwise
-        """
-        category = error_info["category"]
-        severity = error_info["severity"]
-        key = (category, severity)
-        
-        if key in self.recovery_strategies:
-            for strategy in self.recovery_strategies[key]:
-                try:
-                    if strategy(error_info):
-                        self.logger.info(f"Recovery successful for {category.name}/{severity.name}")
-                        return True
-                except Exception as e:
-                    self.logger.error(f"Error in recovery strategy: {str(e)}")
-        
+        if callback in self.error_callbacks[category]:
+            self.error_callbacks[category].remove(callback)
+            self.logger.debug(f"Error callback removed for category {category.name}")
+            return True
         return False
     
-    def get_user_message(self, error: Exception, category: ErrorCategory,
-                        severity: ErrorSeverity) -> str:
+    def _add_to_history(self, error_record: Dict[str, Any]) -> None:
         """
-        Generate a user-friendly error message.
+        Add error record to history.
         
         Args:
-            error: Exception that occurred
-            category: Category of the error
-            severity: Severity of the error
-            
-        Returns:
-            User-friendly error message
+            error_record: Error record to add
         """
-        template = self.message_templates.get(category, {}).get(
-            severity, "Error: {message}"
-        )
+        self.error_history.append(error_record)
         
-        return template.format(message=str(error))
+        # Trim history if needed
+        if len(self.error_history) > self.max_history_size:
+            self.error_history = self.error_history[-self.max_history_size:]
     
-    def get_error_history(self, limit: Optional[int] = None,
-                         category: Optional[ErrorCategory] = None,
-                         min_severity: Optional[ErrorSeverity] = None) -> List[Dict[str, Any]]:
+    def _log_error(self, error_record: Dict[str, Any]) -> None:
         """
-        Get error history, optionally filtered.
+        Log error.
         
         Args:
-            limit: Maximum number of errors to return
-            category: Filter by error category
-            min_severity: Filter by minimum severity
-            
-        Returns:
-            List of error information dictionaries
+            error_record: Error record to log
         """
-        with self.history_lock:
-            filtered_history = self.error_history
-            
-            # Apply filters
-            if category:
-                filtered_history = [e for e in filtered_history if e["category"] == category]
-            
-            if min_severity:
-                filtered_history = [e for e in filtered_history if e["severity"].value >= min_severity.value]
-            
-            # Apply limit
-            if limit is not None:
-                filtered_history = filtered_history[-limit:]
-            
-            return filtered_history
+        severity = error_record["severity"]
+        message = f"{error_record['category']} {severity}: {error_record['error']}"
+        
+        if severity == ErrorSeverity.CRITICAL.name:
+            self.logger.critical(message)
+        elif severity == ErrorSeverity.ERROR.name:
+            self.logger.error(message)
+        elif severity == ErrorSeverity.WARNING.name:
+            self.logger.warning(message)
+        else:
+            self.logger.info(message)
+        
+        # Log traceback for non-info errors
+        if severity != ErrorSeverity.INFO.name:
+            self.logger.debug(f"Traceback: {error_record['traceback']}")
     
-    def clear_error_history(self) -> None:
-        """Clear the error history."""
-        with self.history_lock:
-            self.error_history = []
-        self.logger.debug("Error history cleared")
+    def _call_callbacks(self, error: Exception, category: ErrorCategory,
+                       severity: ErrorSeverity, context: Dict[str, Any]) -> None:
+        """
+        Call error callbacks.
+        
+        Args:
+            error: Exception
+            category: Error category
+            severity: Error severity
+            context: Additional context information
+        """
+        for callback in self.error_callbacks[category]:
+            try:
+                callback(error, severity, context)
+            except Exception as e:
+                # Log but don't recurse
+                self.logger.error(f"Error in error callback: {str(e)}")
+    
+    def _handle_error_event(self, event_data: Dict[str, Any]) -> None:
+        """
+        Handle error event.
+        
+        Args:
+            event_data: Event data
+        """
+        # This is just to handle events from other components
+        # We don't need to do anything here since we already handled the error
+        pass
 
 # Example usage
 if __name__ == "__main__":
     # This is just for demonstration purposes
     logging.basicConfig(level=logging.INFO)
     
-    # Initialize EventBus first
+    # Initialize required components
     event_bus = EventBus.get_instance()
     event_bus.startup()
-    
-    # Subscribe to error events
-    def handle_error_event(event):
-        print(f"Error event: {event.event_type}")
-        print(f"  Error: {event.data['error_type']}: {event.data['message']}")
-    
-    event_bus.subscribe("error.api.error", handle_error_event)
     
     # Initialize ErrorHandler
     error_handler = ErrorHandler.get_instance()
     
-    # Register a recovery strategy
-    def api_error_recovery(error_info):
-        print("Attempting API error recovery...")
-        return True  # Simulate successful recovery
-    
-    error_handler.register_recovery_strategy(
-        ErrorCategory.API, ErrorSeverity.ERROR, api_error_recovery
-    )
-    
-    # Handle some errors
+    # Example usage
     try:
-        # Simulate an API error
-        raise ConnectionError("Failed to connect to API server")
+        # Simulate an error
+        raise ValueError("This is a test error")
     except Exception as e:
-        user_message = error_handler.handle_error(
-            e, ErrorCategory.API, ErrorSeverity.ERROR,
-            {"api": "openrouter", "endpoint": "/completions"}
+        error_handler.handle_error(
+            e, ErrorCategory.SYSTEM, ErrorSeverity.WARNING,
+            {"action": "test"}
         )
-        print(f"User message: {user_message}")
     
-    # Print error history
-    print("\nError history:")
-    for error in error_handler.get_error_history():
-        print(f"- {error['category'].name} {error['severity'].name}: {error['message']}")
+    # Get error history
+    history = error_handler.get_error_history()
+    print(f"Error history: {history}")
     
     # Shutdown
     event_bus.shutdown()
