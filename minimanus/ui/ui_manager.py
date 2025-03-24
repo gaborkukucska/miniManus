@@ -271,39 +271,46 @@ class UIManager:
                             
                             if (message) {
                                 // Add user message to chat
-                                addMessage(message, 'user');
+                                addMessage('user', message);
                                 
                                 // Clear input
                                 input.value = '';
                                 
-                                // Send to backend
+                                // Send message to server
                                 fetch('/api/chat', {
                                     method: 'POST',
                                     headers: {
                                         'Content-Type': 'application/json',
                                     },
-                                    body: JSON.stringify({ message: message }),
+                                    body: JSON.stringify({
+                                        message: message
+                                    }),
                                 })
-                                .then(response => response.json())
+                                .then(response => {
+                                    if (!response.ok) {
+                                        throw new Error('Network response was not ok');
+                                    }
+                                    return response.json();
+                                })
                                 .then(data => {
                                     // Add bot response to chat
-                                    addMessage(data.response, 'bot');
+                                    addMessage('bot', data.response);
                                 })
-                                .catch(error => {
+                                .catch((error) => {
                                     console.error('Error:', error);
-                                    addMessage('Sorry, there was an error processing your request.', 'bot');
+                                    addMessage('bot', 'Sorry, there was an error processing your request.');
                                 });
                             }
                         }
                         
-                        function addMessage(text, sender) {
+                        function addMessage(role, content) {
                             const chatContainer = document.getElementById('chat-container');
                             const messageDiv = document.createElement('div');
-                            messageDiv.className = `message ${sender}-message`;
+                            messageDiv.className = `message ${role}-message`;
                             
                             const bubbleDiv = document.createElement('div');
-                            bubbleDiv.className = `${sender}-bubble`;
-                            bubbleDiv.textContent = text;
+                            bubbleDiv.className = `${role}-bubble`;
+                            bubbleDiv.textContent = content;
                             
                             messageDiv.appendChild(bubbleDiv);
                             chatContainer.appendChild(messageDiv);
@@ -316,14 +323,93 @@ class UIManager:
                 </html>
                 """)
         
-        # Set up the server
+        # Set up the HTTP server
         PORT = self.server_port
+        
+        # Reference to the UIManager instance for the handler
+        ui_manager = self
         
         class CustomHandler(http.server.SimpleHTTPRequestHandler):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, directory=ui_dir, **kwargs)
+            
+            def do_POST(self):
+                """Handle POST requests."""
+                try:
+                    # Check if this is an API request
+                    if self.path == '/api/chat':
+                        # Get content length
+                        content_length = int(self.headers['Content-Length'])
+                        
+                        # Read the request body
+                        post_data = self.rfile.read(content_length)
+                        
+                        # Parse JSON data
+                        request_data = json.loads(post_data.decode('utf-8'))
+                        
+                        # Get the message from the request
+                        message = request_data.get('message', '')
+                        
+                        # Get the chat interface
+                        from ..ui.chat_interface import ChatInterface, MessageRole, ChatMessage
+                        chat_interface = ChatInterface.get_instance()
+                        
+                        # Create a new session if none exists
+                        if not chat_interface.current_session_id:
+                            session = chat_interface.create_session(title="New Chat")
+                        else:
+                            session = chat_interface.get_session(chat_interface.current_session_id)
+                        
+                        # Add user message to session
+                        user_message = ChatMessage(MessageRole.USER, message)
+                        session.add_message(user_message)
+                        
+                        # Process the message (in a real implementation, this would call the LLM API)
+                        # For now, we'll just echo the message back with a prefix
+                        response_text = f"I received your message: {message}"
+                        
+                        # Add assistant message to session
+                        assistant_message = ChatMessage(MessageRole.ASSISTANT, response_text)
+                        session.add_message(assistant_message)
+                        
+                        # Prepare response
+                        response = {
+                            'status': 'success',
+                            'response': response_text
+                        }
+                        
+                        # Send response
+                        self.send_response(200)
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(json.dumps(response).encode('utf-8'))
+                        
+                        # Log the interaction
+                        ui_manager.logger.info(f"Chat message processed: {message}")
+                        
+                    else:
+                        # Handle other POST requests
+                        self.send_response(404)
+                        self.end_headers()
+                        self.wfile.write(b'Not Found')
+                
+                except Exception as e:
+                    # Log the error
+                    ui_manager.logger.error(f"Error handling POST request: {str(e)}")
+                    
+                    # Send error response
+                    self.send_response(500)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    error_response = {
+                        'status': 'error',
+                        'message': 'Internal server error'
+                    }
+                    self.wfile.write(json.dumps(error_response).encode('utf-8'))
         
         try:
+            # Use ThreadingTCPServer with allow_reuse_address to prevent "Address already in use" errors
+            socketserver.TCPServer.allow_reuse_address = True
             self.httpd = socketserver.TCPServer(("0.0.0.0", PORT), CustomHandler)
             self.server_thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
             self.server_thread.start()
@@ -346,42 +432,19 @@ class UIManager:
         """Stop the UI manager."""
         # Stop web server if it's running
         if hasattr(self, 'httpd') and self.httpd:
-            self.httpd.shutdown()
-            self.logger.info("Web server stopped")
+            try:
+                # First shutdown the server (stops serve_forever loop)
+                self.httpd.shutdown()
+                
+                # Then close the socket to release the port
+                self.httpd.server_close()
+                
+                # Wait for server thread to terminate
+                if self.server_thread and self.server_thread.is_alive():
+                    self.server_thread.join(timeout=2.0)
+                
+                self.logger.info("Web server stopped and port released")
+            except Exception as e:
+                self.logger.error(f"Error shutting down web server: {e}")
+        
         self.logger.info("UIManager stopped")
-
-# Example usage
-if __name__ == "__main__":
-    # This is just for demonstration purposes
-    logging.basicConfig(level=logging.INFO)
-    
-    # Initialize required components
-    event_bus = EventBus.get_instance()
-    event_bus.startup()
-    
-    error_handler = ErrorHandler.get_instance()
-    
-    config_manager = ConfigurationManager.get_instance()
-    
-    # Initialize UIManager
-    ui_manager = UIManager.get_instance()
-    ui_manager.startup()
-    
-    # Example usage
-    print(f"UI state: {ui_manager.get_ui_state()}")
-    
-    # Set theme
-    ui_manager.set_theme(UITheme.DARK)
-    
-    # Set font size
-    ui_manager.set_font_size(16)
-    
-    # Toggle animations
-    ui_manager.toggle_animations(False)
-    
-    # Wait for user input
-    input("Press Enter to exit...")
-    
-    # Shutdown
-    ui_manager.shutdown()
-    event_bus.shutdown()

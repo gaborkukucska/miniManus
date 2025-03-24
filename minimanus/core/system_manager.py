@@ -40,6 +40,7 @@ class SystemManager:
     """
     
     _instance = None  # Singleton instance
+    _shutdown_event = threading.Event()  # Event to signal shutdown completion
     
     @classmethod
     def get_instance(cls) -> 'SystemManager':
@@ -60,6 +61,7 @@ class SystemManager:
         self.startup_complete = False
         self._shutdown_lock = threading.Lock()
         self._startup_errors = []
+        self._shutdown_timeout = 5  # Timeout in seconds for shutdown
         
         # Register signal handlers
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -106,6 +108,7 @@ class SystemManager:
         self.logger.info("Starting miniManus system...")
         self.is_running = True
         self.is_shutting_down = False
+        SystemManager._shutdown_event.clear()
         
         # Determine component startup order
         if component_order is None:
@@ -138,17 +141,24 @@ class SystemManager:
         self.logger.info("miniManus system startup complete")
         return True
     
-    def shutdown(self, component_order: Optional[List[str]] = None) -> None:
+    def shutdown(self, component_order: Optional[List[str]] = None, force_exit: bool = False) -> None:
         """
         Shutdown all registered components in the specified order.
         
         Args:
             component_order: Optional list specifying the order in which to shutdown components
+            force_exit: Whether to force exit the process after shutdown
         """
         # Use lock to prevent multiple simultaneous shutdown attempts
         with self._shutdown_lock:
             if self.is_shutting_down:
                 self.logger.info("Shutdown already in progress")
+                
+                # If force_exit is True, exit immediately even if shutdown is in progress
+                if force_exit:
+                    self.logger.info("Forcing exit...")
+                    os._exit(0)  # Use os._exit to force immediate termination
+                
                 return
             
             self.logger.info("Shutting down miniManus system...")
@@ -177,6 +187,14 @@ class SystemManager:
                     self.logger.error(f"Error shutting down component {name}: {str(e)}")
             
             self.logger.info("miniManus system shutdown complete")
+            
+            # Signal that shutdown is complete
+            SystemManager._shutdown_event.set()
+            
+            # If force_exit is True, exit the process
+            if force_exit:
+                self.logger.info("Exiting process...")
+                sys.exit(0)
     
     def _handle_signal(self, signum: int, frame) -> None:
         """
@@ -191,7 +209,22 @@ class SystemManager:
         
         if signum in (signal.SIGINT, signal.SIGTERM):
             self.logger.info("Initiating graceful shutdown...")
-            threading.Thread(target=self.shutdown).start()
+            
+            # If this is the first signal, try graceful shutdown
+            if not self.is_shutting_down:
+                # Start shutdown in a separate thread
+                shutdown_thread = threading.Thread(target=self.shutdown, kwargs={"force_exit": True})
+                shutdown_thread.daemon = True  # Make thread daemon so it doesn't block process exit
+                shutdown_thread.start()
+                
+                # Wait for shutdown to complete with timeout
+                if not SystemManager._shutdown_event.wait(self._shutdown_timeout):
+                    self.logger.warning(f"Shutdown timed out after {self._shutdown_timeout} seconds, forcing exit...")
+                    os._exit(1)  # Force exit if shutdown times out
+            else:
+                # If shutdown is already in progress and we get another signal, force exit
+                self.logger.warning("Received second interrupt signal, forcing immediate exit...")
+                os._exit(1)  # Force immediate exit
     
     def run_forever(self) -> None:
         """Run the system until shutdown is requested."""
@@ -208,7 +241,7 @@ class SystemManager:
             self.logger.info("KeyboardInterrupt received")
         finally:
             if not self.is_shutting_down:
-                self.shutdown()
+                self.shutdown(force_exit=True)
 
 # Example usage
 if __name__ == "__main__":

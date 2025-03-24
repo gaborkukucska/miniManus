@@ -45,18 +45,11 @@ from minimanus.ui.model_selection import ModelSelectionInterface
 
 # Global variables for signal handling
 system_manager = None
-
-def signal_handler(sig, frame):
-    """Handle shutdown signals."""
-    print("\nShutdown signal received, stopping miniManus...")
-    if system_manager:
-        system_manager.shutdown()
-    print("miniManus stopped")
-    sys.exit(0)
+shutdown_requested = False
 
 async def main_async():
     """Main asynchronous function."""
-    global system_manager
+    global system_manager, shutdown_requested
     
     logger.info("Starting miniManus...")
     
@@ -102,20 +95,24 @@ async def main_async():
     system_manager = SystemManager.get_instance()
     system_manager.startup()
     
-    # Discover models
-    model_selection.discover_models()
+    # Discover models - Fixed: properly await the coroutine
+    await model_selection.discover_models()
     
     logger.info("miniManus started successfully")
     
-    # Keep the main thread alive
-    while True:
-        await asyncio.sleep(1)
+    # Keep the main thread alive until shutdown is requested
+    while not shutdown_requested:
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            logger.info("Main loop cancelled, initiating shutdown...")
+            break
 
 def main():
     """Main function."""
-    # Register signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    global system_manager, shutdown_requested
+    
+    # We don't register signal handlers here anymore as they're handled by SystemManager
     
     try:
         # Create necessary directories
@@ -124,13 +121,33 @@ def main():
         os.makedirs(os.path.join(os.environ.get('HOME', '.'), '.local', 'share', 'minimanus', 'plugins'), exist_ok=True)
         
         # Run the async main function
-        asyncio.run(main_async())
-    except KeyboardInterrupt:
-        # Handle Ctrl+C
-        print("\nShutdown signal received, stopping miniManus...")
-        if system_manager:
-            system_manager.shutdown()
-        print("miniManus stopped")
+        loop = asyncio.get_event_loop()
+        main_task = loop.create_task(main_async())
+        
+        try:
+            loop.run_until_complete(main_task)
+        except KeyboardInterrupt:
+            # This should be handled by SystemManager's signal handler,
+            # but we add this as a fallback
+            logger.info("KeyboardInterrupt received in main loop")
+            shutdown_requested = True
+            
+            # Cancel the main task
+            main_task.cancel()
+            
+            try:
+                # Wait for the task to be cancelled
+                loop.run_until_complete(main_task)
+            except asyncio.CancelledError:
+                pass
+            
+            # Ensure system manager shutdown is called
+            if system_manager and not system_manager.is_shutting_down:
+                logger.info("Initiating shutdown from main...")
+                system_manager.shutdown(force_exit=True)
+        finally:
+            loop.close()
+            
     except Exception as e:
         logger.error(f"Error in main: {str(e)}")
         if 'error_handler' in locals():
