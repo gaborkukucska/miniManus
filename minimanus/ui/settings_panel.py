@@ -23,6 +23,7 @@ try:
     from ..core.error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
     from ..core.config_manager import ConfigurationManager
     from ..ui.ui_manager import UIManager, UITheme
+    from ..api.api_manager import APIProvider, APIRequestType
 except ImportError:
     # For standalone testing
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -30,6 +31,7 @@ except ImportError:
     from core.error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
     from core.config_manager import ConfigurationManager
     from ui.ui_manager import UIManager, UITheme
+    from api.api_manager import APIProvider, APIRequestType
 
 logger = logging.getLogger("miniManus.SettingsPanel")
 
@@ -41,6 +43,7 @@ class SettingType(Enum):
     SELECT = auto()
     COLOR = auto()
     SECTION = auto()
+    PASSWORD = auto()  # Added for API keys
 
 class Setting:
     """Represents a setting."""
@@ -289,19 +292,6 @@ class SettingsPanel:
         self.logger.debug(f"Reset setting {key} to default value")
         return True
     
-    def reset_all_settings(self) -> None:
-        """Reset all settings to their default values."""
-        for key, setting in self.settings.items():
-            self.config_manager.set_config(key, setting.default_value)
-            
-            # Publish event
-            self.event_bus.publish_event("settings.changed", {
-                "key": key,
-                "value": setting.default_value
-            })
-        
-        self.logger.info("Reset all settings to default values")
-    
     def _validate_setting_value(self, setting: Setting, value: Any) -> bool:
         """
         Validate a setting value.
@@ -313,49 +303,65 @@ class SettingsPanel:
         Returns:
             True if valid, False otherwise
         """
-        try:
-            if setting.type == SettingType.BOOLEAN:
-                return isinstance(value, bool)
-            
-            elif setting.type == SettingType.STRING:
-                return isinstance(value, str)
-            
-            elif setting.type == SettingType.NUMBER:
-                return isinstance(value, (int, float))
-            
-            elif setting.type == SettingType.SELECT:
-                return any(opt.get("value") == value for opt in setting.options)
-            
-            elif setting.type == SettingType.COLOR:
-                # Check if valid color string (hex, rgb, etc.)
-                return isinstance(value, str) and (
-                    value.startswith("#") or 
-                    value.startswith("rgb") or 
-                    value.startswith("hsl")
-                )
-            
-            elif setting.type == SettingType.SECTION:
-                # Sections don't have values
+        if setting.type == SettingType.BOOLEAN:
+            return isinstance(value, bool)
+        
+        elif setting.type == SettingType.STRING or setting.type == SettingType.PASSWORD:
+            return isinstance(value, str)
+        
+        elif setting.type == SettingType.NUMBER:
+            return isinstance(value, (int, float))
+        
+        elif setting.type == SettingType.SELECT:
+            if not setting.options:
                 return False
             
-            return True
+            valid_values = [option["value"] for option in setting.options]
+            return value in valid_values
         
-        except Exception as e:
-            self.logger.warning(f"Error validating setting {setting.key}: {str(e)}")
-            return False
+        elif setting.type == SettingType.COLOR:
+            if not isinstance(value, str):
+                return False
+            
+            # Simple validation for hex color
+            return value.startswith("#") and len(value) in (4, 7, 9)
+        
+        return False
     
-    def _handle_setting_changed(self, event: Dict[str, Any]) -> None:
+    def _handle_setting_changed(self, event_data: Dict[str, Any]) -> None:
         """
         Handle setting changed event.
         
         Args:
-            event: Event data
+            event_data: Event data
         """
-        key = event.get("key")
-        value = event.get("value")
+        key = event_data.get("key")
+        value = event_data.get("value")
         
-        if key:
-            self.logger.debug(f"Setting changed: {key} = {value}")
+        if key and key in self.settings:
+            setting = self.settings[key]
+            
+            # Handle special settings
+            if key == "ui.theme":
+                try:
+                    theme = UITheme[value]
+                    self.ui_manager.set_theme(theme)
+                except (KeyError, ValueError):
+                    pass
+            
+            elif key == "ui.font_size":
+                try:
+                    font_size = int(value)
+                    self.ui_manager.set_font_size(font_size)
+                except (ValueError, TypeError):
+                    pass
+            
+            elif key == "ui.animations_enabled":
+                try:
+                    enabled = bool(value)
+                    self.ui_manager.toggle_animations(enabled)
+                except (ValueError, TypeError):
+                    pass
     
     def _register_default_settings(self) -> None:
         """Register default settings."""
@@ -392,6 +398,47 @@ class SettingsPanel:
             3
         )
         
+        # Add API provider subsections
+        self.register_section(
+            "api_openrouter",
+            "OpenRouter",
+            "OpenRouter API settings",
+            "cloud",
+            0
+        )
+        
+        self.register_section(
+            "api_anthropic",
+            "Anthropic",
+            "Anthropic API settings",
+            "cloud",
+            1
+        )
+        
+        self.register_section(
+            "api_deepseek",
+            "DeepSeek",
+            "DeepSeek API settings",
+            "cloud",
+            2
+        )
+        
+        self.register_section(
+            "api_ollama",
+            "Ollama",
+            "Ollama API settings",
+            "cloud",
+            3
+        )
+        
+        self.register_section(
+            "api_litellm",
+            "LiteLLM",
+            "LiteLLM API settings",
+            "cloud",
+            4
+        )
+        
         self.register_section(
             "advanced",
             "Advanced",
@@ -399,8 +446,6 @@ class SettingsPanel:
             "code",
             4
         )
-        
-        # Register settings
         
         # General settings
         self.register_setting(Setting(
@@ -412,7 +457,7 @@ class SettingsPanel:
             [
                 {"label": "New Chat", "value": "new_chat"},
                 {"label": "Continue Last Chat", "value": "continue_last"},
-                {"label": "Show Chat List", "value": "show_list"}
+                {"label": "Show Chat List", "value": "chat_list"}
             ],
             "general",
             0
@@ -421,7 +466,7 @@ class SettingsPanel:
         self.register_setting(Setting(
             "general.confirm_exit",
             "Confirm Exit",
-            "Show confirmation dialog when exiting",
+            "Show confirmation dialog before exiting",
             SettingType.BOOLEAN,
             True,
             None,
@@ -457,7 +502,7 @@ class SettingsPanel:
         ))
         
         self.register_setting(Setting(
-            "ui.enable_animations",
+            "ui.animations_enabled",
             "Enable Animations",
             "Enable UI animations",
             SettingType.BOOLEAN,
@@ -467,71 +512,38 @@ class SettingsPanel:
             2
         ))
         
-        self.register_setting(Setting(
-            "ui.compact_mode",
-            "Compact Mode",
-            "Use compact UI mode",
-            SettingType.BOOLEAN,
-            False,
-            None,
-            "appearance",
-            3
-        ))
-        
-        self.register_setting(Setting(
-            "ui.accent_color",
-            "Accent Color",
-            "UI accent color",
-            SettingType.COLOR,
-            "#007bff",
-            None,
-            "appearance",
-            4
-        ))
-        
         # Chat settings
         self.register_setting(Setting(
-            "chat.default_model",
-            "Default Model",
-            "Default model for new chats",
-            SettingType.STRING,
-            "gpt-3.5-turbo",
+            "chat.auto_send_on_enter",
+            "Auto-send on Enter",
+            "Automatically send message when Enter key is pressed",
+            SettingType.BOOLEAN,
+            True,
             None,
             "chat",
             0
         ))
         
         self.register_setting(Setting(
-            "chat.default_system_prompt",
-            "Default System Prompt",
-            "Default system prompt for new chats",
-            SettingType.STRING,
-            "You are a helpful assistant.",
+            "chat.show_timestamps",
+            "Show Timestamps",
+            "Show timestamps for messages",
+            SettingType.BOOLEAN,
+            False,
             None,
             "chat",
             1
         ))
         
         self.register_setting(Setting(
-            "chat.auto_save",
-            "Auto Save",
-            "Automatically save chat history",
-            SettingType.BOOLEAN,
-            True,
-            None,
-            "chat",
-            2
-        ))
-        
-        self.register_setting(Setting(
-            "chat.max_history_length",
-            "Max History Length",
+            "chat.max_history",
+            "Max History",
             "Maximum number of messages to keep in history",
             SettingType.NUMBER,
             100,
             None,
             "chat",
-            3
+            2
         ))
         
         # API settings
@@ -540,9 +552,8 @@ class SettingsPanel:
             "Default Provider",
             "Default API provider",
             SettingType.SELECT,
-            "openai",
+            "openrouter",
             [
-                {"label": "OpenAI", "value": "openai"},
                 {"label": "OpenRouter", "value": "openrouter"},
                 {"label": "DeepSeek", "value": "deepseek"},
                 {"label": "Anthropic", "value": "anthropic"},
@@ -553,6 +564,169 @@ class SettingsPanel:
             0
         ))
         
+        # OpenRouter API settings
+        self.register_setting(Setting(
+            "api.openrouter.api_key",
+            "API Key",
+            "OpenRouter API key",
+            SettingType.PASSWORD,
+            "",
+            None,
+            "api_openrouter",
+            0
+        ))
+        
+        self.register_setting(Setting(
+            "api.openrouter.default_model",
+            "Default Model",
+            "Default model to use with OpenRouter",
+            SettingType.SELECT,
+            "openai/gpt-3.5-turbo",
+            [
+                {"label": "GPT-3.5 Turbo", "value": "openai/gpt-3.5-turbo"},
+                {"label": "GPT-4", "value": "openai/gpt-4"},
+                {"label": "Claude 3 Opus", "value": "anthropic/claude-3-opus"},
+                {"label": "Claude 3 Sonnet", "value": "anthropic/claude-3-sonnet"},
+                {"label": "Llama 3 70B", "value": "meta-llama/llama-3-70b-instruct"},
+                {"label": "Mistral Large", "value": "mistralai/mistral-large"}
+            ],
+            "api_openrouter",
+            1
+        ))
+        
+        # Anthropic API settings
+        self.register_setting(Setting(
+            "api.anthropic.api_key",
+            "API Key",
+            "Anthropic API key",
+            SettingType.PASSWORD,
+            "",
+            None,
+            "api_anthropic",
+            0
+        ))
+        
+        self.register_setting(Setting(
+            "api.anthropic.default_model",
+            "Default Model",
+            "Default model to use with Anthropic",
+            SettingType.SELECT,
+            "claude-3-opus-20240229",
+            [
+                {"label": "Claude 3 Opus", "value": "claude-3-opus-20240229"},
+                {"label": "Claude 3 Sonnet", "value": "claude-3-sonnet-20240229"},
+                {"label": "Claude 3 Haiku", "value": "claude-3-haiku-20240307"}
+            ],
+            "api_anthropic",
+            1
+        ))
+        
+        # DeepSeek API settings
+        self.register_setting(Setting(
+            "api.deepseek.api_key",
+            "API Key",
+            "DeepSeek API key",
+            SettingType.PASSWORD,
+            "",
+            None,
+            "api_deepseek",
+            0
+        ))
+        
+        self.register_setting(Setting(
+            "api.deepseek.default_model",
+            "Default Model",
+            "Default model to use with DeepSeek",
+            SettingType.SELECT,
+            "deepseek-chat",
+            [
+                {"label": "DeepSeek Chat", "value": "deepseek-chat"},
+                {"label": "DeepSeek Coder", "value": "deepseek-coder"}
+            ],
+            "api_deepseek",
+            1
+        ))
+        
+        # Ollama API settings
+        self.register_setting(Setting(
+            "api.ollama.host",
+            "Host",
+            "Ollama host URL (e.g., http://localhost:11434)",
+            SettingType.STRING,
+            "http://localhost:11434",
+            None,
+            "api_ollama",
+            0
+        ))
+        
+        self.register_setting(Setting(
+            "api.ollama.default_model",
+            "Default Model",
+            "Default model to use with Ollama",
+            SettingType.STRING,
+            "llama3",
+            None,
+            "api_ollama",
+            1
+        ))
+        
+        # LiteLLM API settings
+        self.register_setting(Setting(
+            "api.litellm.host",
+            "Host",
+            "LiteLLM host URL",
+            SettingType.STRING,
+            "http://localhost:8000",
+            None,
+            "api_litellm",
+            0
+        ))
+        
+        self.register_setting(Setting(
+            "api.litellm.api_key",
+            "API Key",
+            "LiteLLM API key (if required)",
+            SettingType.PASSWORD,
+            "",
+            None,
+            "api_litellm",
+            1
+        ))
+        
+        self.register_setting(Setting(
+            "api.litellm.default_model",
+            "Default Model",
+            "Default model to use with LiteLLM",
+            SettingType.STRING,
+            "gpt-3.5-turbo",
+            None,
+            "api_litellm",
+            2
+        ))
+        
+        # Common API settings
+        self.register_setting(Setting(
+            "api.temperature",
+            "Temperature",
+            "Model temperature (0.0 to 1.0)",
+            SettingType.NUMBER,
+            0.7,
+            None,
+            "api",
+            1
+        ))
+        
+        self.register_setting(Setting(
+            "api.max_tokens",
+            "Max Tokens",
+            "Maximum number of tokens to generate",
+            SettingType.NUMBER,
+            1024,
+            None,
+            "api",
+            2
+        ))
+        
         self.register_setting(Setting(
             "api.cache.enabled",
             "Enable Cache",
@@ -561,7 +735,7 @@ class SettingsPanel:
             True,
             None,
             "api",
-            1
+            3
         ))
         
         self.register_setting(Setting(
@@ -572,7 +746,7 @@ class SettingsPanel:
             86400,  # 24 hours
             None,
             "api",
-            2
+            4
         ))
         
         # Advanced settings
@@ -597,21 +771,11 @@ class SettingsPanel:
                 {"label": "Debug", "value": "debug"},
                 {"label": "Info", "value": "info"},
                 {"label": "Warning", "value": "warning"},
-                {"label": "Error", "value": "error"}
+                {"label": "Error", "value": "error"},
+                {"label": "Critical", "value": "critical"}
             ],
             "advanced",
             1
-        ))
-        
-        self.register_setting(Setting(
-            "advanced.max_memory_mb",
-            "Max Memory (MB)",
-            "Maximum memory usage (MB)",
-            SettingType.NUMBER,
-            256,
-            None,
-            "advanced",
-            2
         ))
     
     def startup(self) -> None:
@@ -648,9 +812,3 @@ if __name__ == "__main__":
     # Example usage
     print(f"Theme: {settings_panel.get_setting_value('ui.theme')}")
     settings_panel.set_setting_value('ui.theme', UITheme.DARK.name)
-    print(f"Theme after change: {settings_panel.get_setting_value('ui.theme')}")
-    
-    # Shutdown
-    settings_panel.shutdown()
-    ui_manager.shutdown()
-    event_bus.shutdown()

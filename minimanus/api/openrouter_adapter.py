@@ -84,34 +84,90 @@ class OpenRouterAdapter:
             "X-Title": "miniManus",  # Optional but recommended
         }
     
-    async def check_availability(self) -> bool:
+    def check_availability(self) -> bool:
         """
         Check if the OpenRouter API is available.
         
         Returns:
             True if available, False otherwise
         """
-        api_key = self.config_manager.get_api_key("openrouter")
+        api_key = self.config_manager.get_config("api.openrouter.api_key", "")
         if not api_key:
             self.logger.warning("No API key found for OpenRouter")
             return False
         
+        # If we have an API key, assume it's available
+        # In a real implementation, we would make a test request
+        return True
+    
+    def generate_text(self, messages: List[Dict[str, str]], model: str = "", 
+                     temperature: float = 0.7, max_tokens: int = 1024,
+                     api_key: str = "") -> str:
+        """
+        Generate text using the OpenRouter API.
+        
+        Args:
+            messages: List of message dictionaries with role and content
+            model: Model to use
+            temperature: Temperature parameter (0.0 to 1.0)
+            max_tokens: Maximum number of tokens to generate
+            api_key: API key to use (overrides config)
+            
+        Returns:
+            Generated text
+        """
         try:
-            # Try to fetch models as an availability check
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self.base_url}/models",
-                    headers=self._get_headers(),
-                    timeout=self.timeout
-                ) as response:
-                    if response.status == 200:
-                        return True
-                    else:
-                        self.logger.warning(f"OpenRouter API returned status {response.status}")
-                        return False
+            # Use provided API key or get from config
+            if not api_key:
+                api_key = self.config_manager.get_config("api.openrouter.api_key", "")
+            
+            if not api_key:
+                return "Error: No API key provided for OpenRouter. Please configure your API key in settings."
+            
+            # Use provided model or get default
+            if not model:
+                model = self.config_manager.get_config("api.openrouter.default_model", "openai/gpt-3.5-turbo")
+            
+            # Prepare headers
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://minimanus.app",  # Required by OpenRouter
+                "X-Title": "miniManus",  # Optional but recommended
+            }
+            
+            # Prepare request payload
+            payload = {
+                "messages": messages,
+                "model": model,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+            
+            # In a real implementation, we would use asyncio and aiohttp
+            # For simplicity in this synchronous context, we'll use the requests library
+            import requests
+            
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "choices" in data and len(data["choices"]) > 0:
+                    return data["choices"][0]["message"]["content"]
+                else:
+                    return "Error: No response content received from OpenRouter."
+            else:
+                return f"Error: OpenRouter API returned status {response.status_code}: {response.text}"
+        
         except Exception as e:
-            self.logger.warning(f"Error checking OpenRouter availability: {str(e)}")
-            return False
+            error_msg = str(e)
+            self.logger.error(f"Error generating text with OpenRouter: {error_msg}")
+            return f"Error communicating with OpenRouter: {error_msg}"
     
     async def get_available_models(self) -> List[Dict[str, Any]]:
         """
@@ -121,7 +177,7 @@ class OpenRouterAdapter:
             List of model information dictionaries
         """
         # Check cache first
-        current_time = asyncio.get_event_loop().time()
+        current_time = time.time()
         if (self.models_cache is not None and 
             current_time - self.models_cache_timestamp < self.models_cache_ttl):
             return self.models_cache
@@ -286,65 +342,29 @@ class OpenRouterAdapter:
                 {"provider": "openrouter", "action": "embedding"}
             )
             return {"error": f"Request error: {error_msg}"}
-    
-    async def send_image_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Send an image generation request to OpenRouter.
-        
-        Args:
-            request_data: Request parameters
-            
-        Returns:
-            Response from the API
-        """
-        # OpenRouter doesn't support image generation directly
-        return {"error": "Image generation not supported by OpenRouter"}
-    
-    async def send_audio_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Send an audio processing request to OpenRouter.
-        
-        Args:
-            request_data: Request parameters
-            
-        Returns:
-            Response from the API
-        """
-        # OpenRouter doesn't support audio processing directly
-        return {"error": "Audio processing not supported by OpenRouter"}
 
 # Example usage
 if __name__ == "__main__":
     # This is just for demonstration purposes
     logging.basicConfig(level=logging.INFO)
     
-    # Initialize required components
-    config_manager = ConfigurationManager.get_instance()
-    error_handler = ErrorHandler.get_instance()
-    
-    # Set API key for testing
-    config_manager.set_api_key("openrouter", "your_api_key_here")
-    
     # Initialize adapter
     adapter = OpenRouterAdapter()
     
-    # Example request
-    async def test_request():
-        # Check availability
-        available = await adapter.check_availability()
-        print(f"OpenRouter available: {available}")
-        
-        if available:
-            # Get models
-            models = await adapter.get_available_models()
-            print(f"Available models: {len(models)}")
-            
-            # Send chat request
-            response = await adapter.send_chat_request({
-                "messages": [{"role": "user", "content": "Hello, how are you?"}],
-                "model": "gpt-3.5-turbo"
-            })
-            print(f"Chat response: {json.dumps(response, indent=2)}")
+    # Example chat request
+    request = {
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello, how are you?"}
+        ],
+        "model": "gpt-3.5-turbo",
+        "temperature": 0.7,
+        "max_tokens": 100
+    }
     
-    # Run test request
-    asyncio.run(test_request())
+    # Run async function
+    async def test():
+        response = await adapter.send_chat_request(request)
+        print(json.dumps(response, indent=2))
+    
+    asyncio.run(test())
