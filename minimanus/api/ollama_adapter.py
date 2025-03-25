@@ -15,6 +15,7 @@ import logging
 import aiohttp
 import asyncio
 import socket
+import requests
 from typing import Dict, List, Optional, Any, Union
 
 # Import local modules
@@ -47,16 +48,16 @@ class OllamaAdapter:
         
         # API configuration
         self.base_url = self.config_manager.get_config(
-            "api.providers.ollama.base_url", 
-            "http://localhost:11434/api"
+            "api.ollama.host", 
+            "http://localhost:11434"
         )
         self.timeout = self.config_manager.get_config(
             "api.providers.ollama.timeout", 
             30
         )
         self.default_model = self.config_manager.get_config(
-            "api.providers.ollama.default_model", 
-            "llama2"
+            "api.ollama.default_model", 
+            "llama3"
         )
         
         # Available models cache
@@ -95,10 +96,10 @@ class OllamaAdapter:
         # First check localhost
         for port in self.discovery_ports:
             try:
-                url = f"http://localhost:{port}/api"
+                url = f"http://localhost:{port}"
                 async with aiohttp.ClientSession() as session:
                     async with session.get(
-                        f"{url}/tags",
+                        f"{url}/api/tags",
                         timeout=self.discovery_timeout
                     ) as response:
                         if response.status == 200:
@@ -140,10 +141,10 @@ class OllamaAdapter:
                 
             for port in self.discovery_ports:
                 try:
-                    url = f"http://{ip}:{port}/api"
+                    url = f"http://{ip}:{port}"
                     async with aiohttp.ClientSession() as session:
                         async with session.get(
-                            f"{url}/tags",
+                            f"{url}/api/tags",
                             timeout=self.discovery_timeout
                         ) as response:
                             if response.status == 200:
@@ -180,12 +181,12 @@ class OllamaAdapter:
         Returns:
             True if available, False otherwise
         """
-        # Run the async method in a new event loop
-        loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(self._check_availability_async())
-        finally:
-            loop.close()
+            response = requests.get(f"{self.base_url}/api/tags", timeout=self.timeout)
+            return response.status_code == 200
+        except Exception as e:
+            self.logger.warning(f"Ollama API not available: {str(e)}")
+            return False
     
     async def _check_availability_async(self) -> bool:
         """
@@ -198,7 +199,7 @@ class OllamaAdapter:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    f"{self.base_url}/tags",
+                    f"{self.base_url}/api/tags",
                     timeout=self.timeout
                 ) as response:
                     if response.status == 200:
@@ -211,7 +212,7 @@ class OllamaAdapter:
         if servers:
             # Update base URL to the first discovered server
             self.base_url = servers[0]
-            self.config_manager.set_config("api.providers.ollama.base_url", self.base_url)
+            self.config_manager.set_config("api.ollama.host", self.base_url)
             self.logger.info(f"Updated Ollama base URL to {self.base_url}")
             return True
         
@@ -234,7 +235,7 @@ class OllamaAdapter:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    f"{self.base_url}/tags",
+                    f"{self.base_url}/api/tags",
                     timeout=self.timeout
                 ) as response:
                     if response.status == 200:
@@ -282,18 +283,62 @@ class OllamaAdapter:
         Returns:
             Generated text
         """
-        # Run the async method in a new event loop
-        loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(
-                self._generate_text_async(messages, model, temperature, max_tokens)
+            # Use the provided model or fall back to default
+            model_name = model or self.default_model
+            
+            # Convert messages to Ollama format
+            prompt = ""
+            system_prompt = None
+            
+            for msg in messages:
+                role = msg.get("role", "").lower()
+                content = msg.get("content", "")
+                
+                if role == "system" and not system_prompt:
+                    system_prompt = content
+                elif role == "user":
+                    prompt += f"User: {content}\n"
+                elif role == "assistant":
+                    prompt += f"Assistant: {content}\n"
+            
+            # Add final prompt for assistant response
+            prompt += "Assistant: "
+            
+            # Prepare request payload
+            payload = {
+                "model": model_name,
+                "prompt": prompt,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": False
+            }
+            
+            if system_prompt:
+                payload["system"] = system_prompt
+            
+            # Make the API request
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=self.timeout
             )
-        finally:
-            loop.close()
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result.get("response", "")
+            else:
+                error_message = f"Ollama API error: {response.status_code} - {response.text}"
+                self.logger.error(error_message)
+                return f"I'm sorry, but the ollama API is not available. Please check your API settings and ensure you've entered a valid API key."
+                
+        except Exception as e:
+            error_message = f"Error generating text with Ollama: {str(e)}"
+            self.logger.error(error_message)
+            return f"I'm sorry, but there was an error communicating with the language model: {str(e)}"
     
-    async def _generate_text_async(self, messages: List[Dict[str, str]], 
-                                 model: str = None, temperature: float = 0.7, 
-                                 max_tokens: int = 1024) -> str:
+    async def _generate_text_async(self, messages: List[Dict[str, str]], model: str = None,
+                                 temperature: float = 0.7, max_tokens: int = 1024) -> str:
         """
         Async implementation of generate_text.
         
@@ -306,70 +351,57 @@ class OllamaAdapter:
         Returns:
             Generated text
         """
-        if not model:
-            model = self.default_model
-        
-        # Format messages for Ollama API
-        formatted_messages = []
-        for msg in messages:
-            role = msg.get("role", "user").lower()
-            content = msg.get("content", "")
-            
-            # Ollama uses 'user' and 'assistant' roles
-            if role == "system":
-                # For system messages, we'll prepend to the first user message
-                # or add as a user message if there are no user messages
-                system_content = content
-                continue
-            
-            formatted_messages.append({
-                "role": role,
-                "content": content
-            })
-        
-        # Add system message as a prefix to the first user message if it exists
-        if 'system_content' in locals() and formatted_messages:
-            for i, msg in enumerate(formatted_messages):
-                if msg["role"] == "user":
-                    formatted_messages[i]["content"] = f"{system_content}\n\n{msg['content']}"
-                    break
-            else:
-                # No user messages found, add system as a user message
-                formatted_messages.append({
-                    "role": "user",
-                    "content": system_content
-                })
-        
-        # Prepare request data
-        request_data = {
-            "model": model,
-            "messages": formatted_messages,
-            "stream": False,
-            "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens
-            }
-        }
-        
         try:
+            # Use the provided model or fall back to default
+            model_name = model or self.default_model
+            
+            # Convert messages to Ollama format
+            prompt = ""
+            system_prompt = None
+            
+            for msg in messages:
+                role = msg.get("role", "").lower()
+                content = msg.get("content", "")
+                
+                if role == "system" and not system_prompt:
+                    system_prompt = content
+                elif role == "user":
+                    prompt += f"User: {content}\n"
+                elif role == "assistant":
+                    prompt += f"Assistant: {content}\n"
+            
+            # Add final prompt for assistant response
+            prompt += "Assistant: "
+            
+            # Prepare request payload
+            payload = {
+                "model": model_name,
+                "prompt": prompt,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": False
+            }
+            
+            if system_prompt:
+                payload["system"] = system_prompt
+            
+            # Make the API request
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{self.base_url}/chat",
-                    json=request_data,
+                    f"{self.base_url}/api/generate",
+                    json=payload,
                     timeout=self.timeout
                 ) as response:
                     if response.status == 200:
-                        data = await response.json()
-                        return data.get("message", {}).get("content", "")
+                        result = await response.json()
+                        return result.get("response", "")
                     else:
                         error_text = await response.text()
-                        self.logger.error(f"Error generating text: {response.status} - {error_text}")
-                        return f"Error: {error_text}"
+                        error_message = f"Ollama API error: {response.status} - {error_text}"
+                        self.logger.error(error_message)
+                        return f"I'm sorry, but the ollama API is not available. Please check your API settings and ensure you've entered a valid API key."
+                        
         except Exception as e:
-            error_msg = str(e)
-            self.logger.error(f"Exception in generate_text: {error_msg}")
-            self.error_handler.handle_error(
-                e, ErrorCategory.API, ErrorSeverity.ERROR,
-                {"provider": "ollama", "action": "generate_text"}
-            )
-            return f"Error: {error_msg}"
+            error_message = f"Error generating text with Ollama: {str(e)}"
+            self.logger.error(error_message)
+            return f"I'm sorry, but there was an error communicating with the language model: {str(e)}"

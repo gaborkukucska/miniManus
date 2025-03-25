@@ -12,6 +12,7 @@
     --message-user-text: white;
     --message-assistant-bg: #e5e5ea;
     --message-assistant-text: #333;
+    --font-size: 14px;
 }
 
 /* Dark Theme Variables */
@@ -38,6 +39,7 @@ body {
     background-color: var(--secondary-color);
     line-height: 1.6;
     transition: background-color 0.3s, color 0.3s;
+    font-size: var(--font-size);
 }
 
 .app-container {
@@ -88,24 +90,16 @@ main {
     max-width: 800px;
     margin: 0 auto;
     width: 100%;
-    position: relative; /* Added for absolute positioning of sections */
+    position: relative;
 }
 
 .section {
     display: none;
-    position: absolute; /* Position absolutely to prevent stacking */
-    top: 1rem;
-    left: 1rem;
-    right: 1rem;
-    width: calc(100% - 2rem); /* Account for padding */
+    width: 100%;
 }
 
 .active-section {
     display: block;
-    position: relative; /* Reset position for active section */
-    top: auto;
-    left: auto;
-    right: auto;
 }
 
 /* Chat Interface Styles */

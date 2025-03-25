@@ -5,7 +5,7 @@
 OpenRouter API Adapter for miniManus
 
 This module implements the adapter for the OpenRouter API, which provides
-access to various commercial language models.
+access to various AI models through a unified interface.
 """
 
 import os
@@ -14,6 +14,7 @@ import json
 import logging
 import aiohttp
 import asyncio
+import requests
 from typing import Dict, List, Optional, Any, Union
 
 # Import local modules
@@ -35,7 +36,7 @@ class OpenRouterAdapter:
     Adapter for the OpenRouter API.
     
     This adapter provides methods to interact with the OpenRouter API,
-    which offers access to various commercial language models.
+    which offers access to various AI models through a unified interface.
     """
     
     def __init__(self):
@@ -51,7 +52,7 @@ class OpenRouterAdapter:
             60
         )
         self.default_model = self.config_manager.get_config(
-            "api.providers.openrouter.default_model", 
+            "api.openrouter.default_model", 
             "openai/gpt-4-turbo"
         )
         
@@ -69,12 +70,26 @@ class OpenRouterAdapter:
         Returns:
             True if available, False otherwise
         """
-        # Run the async method in a new event loop
-        loop = asyncio.new_event_loop()
+        api_key = self.config_manager.get_config("api.openrouter.api_key", "")
+        if not api_key:
+            self.logger.warning("OpenRouter API key not configured")
+            return False
+        
         try:
-            return loop.run_until_complete(self._check_availability_async())
-        finally:
-            loop.close()
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "HTTP-Referer": "https://minimanus.app",
+                "X-Title": "miniManus"
+            }
+            response = requests.get(
+                f"{self.base_url}/models",
+                headers=headers,
+                timeout=self.timeout
+            )
+            return response.status_code == 200
+        except Exception as e:
+            self.logger.warning(f"OpenRouter API not available: {str(e)}")
+            return False
     
     async def _check_availability_async(self) -> bool:
         """
@@ -83,32 +98,26 @@ class OpenRouterAdapter:
         Returns:
             True if available, False otherwise
         """
-        # Get API key
         api_key = self.config_manager.get_config("api.openrouter.api_key", "")
         if not api_key:
             self.logger.warning("OpenRouter API key not configured")
             return False
         
-        # Check if API is available
         try:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "HTTP-Referer": "https://minimanus.app",
+                "X-Title": "miniManus"
+            }
             async with aiohttp.ClientSession() as session:
                 async with session.get(
                     f"{self.base_url}/models",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "HTTP-Referer": "https://minimanus.app",
-                        "X-Title": "miniManus"
-                    },
+                    headers=headers,
                     timeout=self.timeout
                 ) as response:
-                    if response.status == 200:
-                        return True
-                    else:
-                        error_text = await response.text()
-                        self.logger.error(f"Error checking OpenRouter availability: {response.status} - {error_text}")
-                        return False
+                    return response.status == 200
         except Exception as e:
-            self.logger.error(f"Exception checking OpenRouter availability: {str(e)}")
+            self.logger.warning(f"OpenRouter API not available: {str(e)}")
             return False
     
     async def get_available_models(self) -> List[Dict[str, Any]]:
@@ -124,21 +133,21 @@ class OpenRouterAdapter:
             current_time - self.models_cache_timestamp < self.models_cache_ttl):
             return self.models_cache
         
-        # Get API key
         api_key = self.config_manager.get_config("api.openrouter.api_key", "")
         if not api_key:
             self.logger.warning("OpenRouter API key not configured")
             return []
         
         try:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "HTTP-Referer": "https://minimanus.app",
+                "X-Title": "miniManus"
+            }
             async with aiohttp.ClientSession() as session:
                 async with session.get(
                     f"{self.base_url}/models",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "HTTP-Referer": "https://minimanus.app",
-                        "X-Title": "miniManus"
-                    },
+                    headers=headers,
                     timeout=self.timeout
                 ) as response:
                     if response.status == 200:
@@ -188,18 +197,60 @@ class OpenRouterAdapter:
         Returns:
             Generated text
         """
-        # Run the async method in a new event loop
-        loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(
-                self._generate_text_async(messages, model, temperature, max_tokens, api_key)
+            # Use the provided API key or fall back to configured key
+            key = api_key or self.config_manager.get_config("api.openrouter.api_key", "")
+            if not key:
+                return "I'm sorry, but the OpenRouter API key is not configured. Please check your API settings."
+            
+            # Use the provided model or fall back to default
+            model_name = model or self.default_model
+            
+            # Prepare request payload
+            payload = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+            
+            # Prepare headers
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://minimanus.app",
+                "X-Title": "miniManus"
+            }
+            
+            # Make the API request
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=self.timeout
             )
-        finally:
-            loop.close()
+            
+            if response.status_code == 200:
+                result = response.json()
+                choices = result.get("choices", [])
+                if choices:
+                    message = choices[0].get("message", {})
+                    return message.get("content", "")
+                else:
+                    return "I'm sorry, but the API response did not contain any choices."
+            else:
+                error_message = f"OpenRouter API error: {response.status_code} - {response.text}"
+                self.logger.error(error_message)
+                return f"I'm sorry, but the OpenRouter API is not available. Please check your API settings and ensure you've entered a valid API key."
+                
+        except Exception as e:
+            error_message = f"Error generating text with OpenRouter: {str(e)}"
+            self.logger.error(error_message)
+            return f"I'm sorry, but there was an error communicating with the language model: {str(e)}"
     
-    async def _generate_text_async(self, messages: List[Dict[str, str]], 
-                                 model: str = None, temperature: float = 0.7, 
-                                 max_tokens: int = 1024, api_key: str = None) -> str:
+    async def _generate_text_async(self, messages: List[Dict[str, str]], model: str = None,
+                                 temperature: float = 0.7, max_tokens: int = 1024,
+                                 api_key: str = None) -> str:
         """
         Async implementation of generate_text.
         
@@ -213,48 +264,54 @@ class OpenRouterAdapter:
         Returns:
             Generated text
         """
-        if not model:
-            model = self.default_model
-        
-        if not api_key:
-            api_key = self.config_manager.get_config("api.openrouter.api_key", "")
-            if not api_key:
-                self.logger.error("OpenRouter API key not configured")
-                return "Error: OpenRouter API key not configured. Please set your API key in the settings."
-        
-        # Prepare request data
-        request_data = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-        
         try:
+            # Use the provided API key or fall back to configured key
+            key = api_key or self.config_manager.get_config("api.openrouter.api_key", "")
+            if not key:
+                return "I'm sorry, but the OpenRouter API key is not configured. Please check your API settings."
+            
+            # Use the provided model or fall back to default
+            model_name = model or self.default_model
+            
+            # Prepare request payload
+            payload = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+            
+            # Prepare headers
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://minimanus.app",
+                "X-Title": "miniManus"
+            }
+            
+            # Make the API request
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{self.base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "HTTP-Referer": "https://minimanus.app",
-                        "X-Title": "miniManus",
-                        "Content-Type": "application/json"
-                    },
-                    json=request_data,
+                    headers=headers,
+                    json=payload,
                     timeout=self.timeout
                 ) as response:
                     if response.status == 200:
-                        data = await response.json()
-                        return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                        result = await response.json()
+                        choices = result.get("choices", [])
+                        if choices:
+                            message = choices[0].get("message", {})
+                            return message.get("content", "")
+                        else:
+                            return "I'm sorry, but the API response did not contain any choices."
                     else:
                         error_text = await response.text()
-                        self.logger.error(f"Error generating text: {response.status} - {error_text}")
-                        return f"Error: {error_text}"
+                        error_message = f"OpenRouter API error: {response.status} - {error_text}"
+                        self.logger.error(error_message)
+                        return f"I'm sorry, but the OpenRouter API is not available. Please check your API settings and ensure you've entered a valid API key."
+                        
         except Exception as e:
-            error_msg = str(e)
-            self.logger.error(f"Exception in generate_text: {error_msg}")
-            self.error_handler.handle_error(
-                e, ErrorCategory.API, ErrorSeverity.ERROR,
-                {"provider": "openrouter", "action": "generate_text"}
-            )
-            return f"Error: {error_msg}"
+            error_message = f"Error generating text with OpenRouter: {str(e)}"
+            self.logger.error(error_message)
+            return f"I'm sorry, but there was an error communicating with the language model: {str(e)}"

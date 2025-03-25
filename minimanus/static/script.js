@@ -32,10 +32,21 @@ document.addEventListener('DOMContentLoaded', function() {
         settingsTab.classList.remove('active');
         tab.classList.add('active');
         
-        // Update section classes
+        // Update section visibility
         chatSection.classList.remove('active-section');
         settingsSection.classList.remove('active-section');
+        
+        // Add active-section class to make the selected section visible
         section.classList.add('active-section');
+        
+        // Ensure proper display property is set
+        if (section === chatSection) {
+            chatSection.style.display = 'block';
+            settingsSection.style.display = 'none';
+        } else {
+            chatSection.style.display = 'none';
+            settingsSection.style.display = 'block';
+        }
     }
     
     // Chat Functionality
@@ -82,7 +93,7 @@ document.addEventListener('DOMContentLoaded', function() {
         })
         .then(response => {
             if (!response.ok) {
-                throw new Error('Network response was not ok');
+                throw new Error('Network response was not ok: ' + response.status);
             }
             return response.json();
         })
@@ -99,6 +110,7 @@ document.addEventListener('DOMContentLoaded', function() {
             
             // Add error message
             addMessage('Sorry, there was an error processing your request: ' + error.message, 'assistant');
+            console.error('Error:', error);
         });
     }
     
