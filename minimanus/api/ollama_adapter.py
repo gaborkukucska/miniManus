@@ -173,9 +173,23 @@ class OllamaAdapter:
             self.logger.warning(f"Error getting local IP: {str(e)}")
             return None
     
-    async def check_availability(self) -> bool:
+    def check_availability(self) -> bool:
         """
         Check if the Ollama API is available.
+        
+        Returns:
+            True if available, False otherwise
+        """
+        # Run the async method in a new event loop
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._check_availability_async())
+        finally:
+            loop.close()
+    
+    async def _check_availability_async(self) -> bool:
+        """
+        Async implementation of check_availability.
         
         Returns:
             True if available, False otherwise
@@ -252,275 +266,110 @@ class OllamaAdapter:
             )
             return []
     
-    async def send_chat_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+    def generate_text(self, messages: List[Dict[str, str]], model: str = None, 
+                     temperature: float = 0.7, max_tokens: int = 1024, 
+                     api_key: str = None) -> str:
         """
-        Send a chat completion request to Ollama.
+        Generate text using the Ollama API.
         
         Args:
-            request_data: Request parameters
+            messages: List of message dictionaries with 'role' and 'content' keys
+            model: Model to use (defaults to configured default model)
+            temperature: Temperature parameter for generation
+            max_tokens: Maximum number of tokens to generate
+            api_key: API key (not used for Ollama but included for compatibility)
             
         Returns:
-            Response from the API
+            Generated text
         """
-        # Ensure we have the required fields
-        if "messages" not in request_data:
-            return {"error": "Missing required field: messages"}
+        # Run the async method in a new event loop
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                self._generate_text_async(messages, model, temperature, max_tokens)
+            )
+        finally:
+            loop.close()
+    
+    async def _generate_text_async(self, messages: List[Dict[str, str]], 
+                                 model: str = None, temperature: float = 0.7, 
+                                 max_tokens: int = 1024) -> str:
+        """
+        Async implementation of generate_text.
         
-        # Prepare request payload
-        payload = {
-            "model": request_data.get("model", self.default_model),
-            "messages": request_data["messages"],
-            "stream": request_data.get("stream", False),
-            "options": {}
+        Args:
+            messages: List of message dictionaries with 'role' and 'content' keys
+            model: Model to use (defaults to configured default model)
+            temperature: Temperature parameter for generation
+            max_tokens: Maximum number of tokens to generate
+            
+        Returns:
+            Generated text
+        """
+        if not model:
+            model = self.default_model
+        
+        # Format messages for Ollama API
+        formatted_messages = []
+        for msg in messages:
+            role = msg.get("role", "user").lower()
+            content = msg.get("content", "")
+            
+            # Ollama uses 'user' and 'assistant' roles
+            if role == "system":
+                # For system messages, we'll prepend to the first user message
+                # or add as a user message if there are no user messages
+                system_content = content
+                continue
+            
+            formatted_messages.append({
+                "role": role,
+                "content": content
+            })
+        
+        # Add system message as a prefix to the first user message if it exists
+        if 'system_content' in locals() and formatted_messages:
+            for i, msg in enumerate(formatted_messages):
+                if msg["role"] == "user":
+                    formatted_messages[i]["content"] = f"{system_content}\n\n{msg['content']}"
+                    break
+            else:
+                # No user messages found, add system as a user message
+                formatted_messages.append({
+                    "role": "user",
+                    "content": system_content
+                })
+        
+        # Prepare request data
+        request_data = {
+            "model": model,
+            "messages": formatted_messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens
+            }
         }
-        
-        # Add optional parameters if provided
-        if "temperature" in request_data:
-            payload["options"]["temperature"] = request_data["temperature"]
-        
-        if "top_p" in request_data:
-            payload["options"]["top_p"] = request_data["top_p"]
-        
-        if "max_tokens" in request_data:
-            payload["options"]["num_predict"] = request_data["max_tokens"]
         
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{self.base_url}/chat",
-                    json=payload,
+                    json=request_data,
                     timeout=self.timeout
                 ) as response:
                     if response.status == 200:
-                        ollama_response = await response.json()
-                        
-                        # Convert Ollama response format to OpenAI-like format for consistency
-                        return {
-                            "id": ollama_response.get("id", ""),
-                            "object": "chat.completion",
-                            "created": int(asyncio.get_event_loop().time()),
-                            "model": ollama_response.get("model", ""),
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "message": {
-                                        "role": "assistant",
-                                        "content": ollama_response.get("message", {}).get("content", "")
-                                    },
-                                    "finish_reason": "stop"
-                                }
-                            ],
-                            "usage": {
-                                "prompt_tokens": ollama_response.get("prompt_eval_count", 0),
-                                "completion_tokens": ollama_response.get("eval_count", 0),
-                                "total_tokens": (
-                                    ollama_response.get("prompt_eval_count", 0) + 
-                                    ollama_response.get("eval_count", 0)
-                                )
-                            }
-                        }
+                        data = await response.json()
+                        return data.get("message", {}).get("content", "")
                     else:
                         error_text = await response.text()
-                        self.logger.error(f"Error in chat request: {response.status} - {error_text}")
-                        return {"error": f"API error: {response.status} - {error_text}"}
+                        self.logger.error(f"Error generating text: {response.status} - {error_text}")
+                        return f"Error: {error_text}"
         except Exception as e:
             error_msg = str(e)
+            self.logger.error(f"Exception in generate_text: {error_msg}")
             self.error_handler.handle_error(
                 e, ErrorCategory.API, ErrorSeverity.ERROR,
-                {"provider": "ollama", "action": "chat_completion"}
+                {"provider": "ollama", "action": "generate_text"}
             )
-            return {"error": f"Request error: {error_msg}"}
-    
-    async def send_completion_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Send a text completion request to Ollama.
-        
-        Args:
-            request_data: Request parameters
-            
-        Returns:
-            Response from the API
-        """
-        # Ensure we have the required fields
-        if "prompt" not in request_data:
-            return {"error": "Missing required field: prompt"}
-        
-        # Prepare request payload
-        payload = {
-            "model": request_data.get("model", self.default_model),
-            "prompt": request_data["prompt"],
-            "stream": request_data.get("stream", False),
-            "options": {}
-        }
-        
-        # Add optional parameters if provided
-        if "temperature" in request_data:
-            payload["options"]["temperature"] = request_data["temperature"]
-        
-        if "top_p" in request_data:
-            payload["options"]["top_p"] = request_data["top_p"]
-        
-        if "max_tokens" in request_data:
-            payload["options"]["num_predict"] = request_data["max_tokens"]
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.base_url}/generate",
-                    json=payload,
-                    timeout=self.timeout
-                ) as response:
-                    if response.status == 200:
-                        ollama_response = await response.json()
-                        
-                        # Convert Ollama response format to OpenAI-like format for consistency
-                        return {
-                            "id": ollama_response.get("id", ""),
-                            "object": "text_completion",
-                            "created": int(asyncio.get_event_loop().time()),
-                            "model": ollama_response.get("model", ""),
-                            "choices": [
-                                {
-                                    "text": ollama_response.get("response", ""),
-                                    "index": 0,
-                                    "finish_reason": "stop"
-                                }
-                            ],
-                            "usage": {
-                                "prompt_tokens": ollama_response.get("prompt_eval_count", 0),
-                                "completion_tokens": ollama_response.get("eval_count", 0),
-                                "total_tokens": (
-                                    ollama_response.get("prompt_eval_count", 0) + 
-                                    ollama_response.get("eval_count", 0)
-                                )
-                            }
-                        }
-                    else:
-                        error_text = await response.text()
-                        self.logger.error(f"Error in completion request: {response.status} - {error_text}")
-                        return {"error": f"API error: {response.status} - {error_text}"}
-        except Exception as e:
-            error_msg = str(e)
-            self.error_handler.handle_error(
-                e, ErrorCategory.API, ErrorSeverity.ERROR,
-                {"provider": "ollama", "action": "completion"}
-            )
-            return {"error": f"Request error: {error_msg}"}
-    
-    async def send_embedding_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Send an embedding request to Ollama.
-        
-        Args:
-            request_data: Request parameters
-            
-        Returns:
-            Response from the API
-        """
-        # Ensure we have the required fields
-        if "input" not in request_data:
-            return {"error": "Missing required field: input"}
-        
-        # Prepare request payload
-        payload = {
-            "model": request_data.get("model", self.default_model),
-            "prompt": request_data["input"],
-            "options": {}
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.base_url}/embeddings",
-                    json=payload,
-                    timeout=self.timeout
-                ) as response:
-                    if response.status == 200:
-                        ollama_response = await response.json()
-                        
-                        # Convert Ollama response format to OpenAI-like format for consistency
-                        return {
-                            "object": "list",
-                            "data": [
-                                {
-                                    "object": "embedding",
-                                    "embedding": ollama_response.get("embedding", []),
-                                    "index": 0
-                                }
-                            ],
-                            "model": ollama_response.get("model", ""),
-                            "usage": {
-                                "prompt_tokens": ollama_response.get("prompt_eval_count", 0),
-                                "total_tokens": ollama_response.get("prompt_eval_count", 0)
-                            }
-                        }
-                    else:
-                        error_text = await response.text()
-                        self.logger.error(f"Error in embedding request: {response.status} - {error_text}")
-                        return {"error": f"API error: {response.status} - {error_text}"}
-        except Exception as e:
-            error_msg = str(e)
-            self.error_handler.handle_error(
-                e, ErrorCategory.API, ErrorSeverity.ERROR,
-                {"provider": "ollama", "action": "embedding"}
-            )
-            return {"error": f"Request error: {error_msg}"}
-    
-    async def send_image_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Send an image generation request to Ollama.
-        
-        Args:
-            request_data: Request parameters
-            
-        Returns:
-            Response from the API
-        """
-        # Ollama doesn't support image generation directly
-        return {"error": "Image generation not supported by Ollama"}
-    
-    async def send_audio_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Send an audio processing request to Ollama.
-        
-        Args:
-            request_data: Request parameters
-            
-        Returns:
-            Response from the API
-        """
-        # Ollama doesn't support audio processing
-        return {"error": "Audio processing not supported by Ollama"}
-
-# Example usage
-if __name__ == "__main__":
-    # This is just for demonstration purposes
-    logging.basicConfig(level=logging.INFO)
-    
-    # Initialize required components
-    config_manager = ConfigurationManager.get_instance()
-    error_handler = ErrorHandler.get_instance()
-    
-    # Initialize adapter
-    adapter = OllamaAdapter()
-    
-    # Example request
-    async def test_request():
-        # Check availability
-        available = await adapter.check_availability()
-        print(f"Ollama available: {available}")
-        
-        if available:
-            # Get models
-            models = await adapter.get_available_models()
-            print(f"Available models: {len(models)}")
-            
-            # Send chat request
-            response = await adapter.send_chat_request({
-                "messages": [{"role": "user", "content": "Hello, how are you?"}],
-                "model": "llama2"
-            })
-            print(f"Chat response: {json.dumps(response, indent=2)}")
-    
-    # Run test request
-    asyncio.run(test_request())
+            return f"Error: {error_msg}"

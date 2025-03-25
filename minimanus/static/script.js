@@ -3,11 +3,9 @@
 document.addEventListener('DOMContentLoaded', function() {
     // DOM Elements
     const chatTab = document.getElementById('chat-tab');
-    const modelsTab = document.getElementById('models-tab');
     const settingsTab = document.getElementById('settings-tab');
     
     const chatSection = document.getElementById('chat-section');
-    const modelsSection = document.getElementById('models-section');
     const settingsSection = document.getElementById('settings-section');
     
     const messageInput = document.getElementById('message-input');
@@ -16,17 +14,11 @@ document.addEventListener('DOMContentLoaded', function() {
     
     const defaultProvider = document.getElementById('default-provider');
     const saveSettings = document.getElementById('save-settings');
-    const saveModel = document.getElementById('save-model');
     
     // Tab Navigation
     chatTab.addEventListener('click', function(e) {
         e.preventDefault();
         setActiveTab(chatTab, chatSection);
-    });
-    
-    modelsTab.addEventListener('click', function(e) {
-        e.preventDefault();
-        setActiveTab(modelsTab, modelsSection);
     });
     
     settingsTab.addEventListener('click', function(e) {
@@ -37,13 +29,11 @@ document.addEventListener('DOMContentLoaded', function() {
     function setActiveTab(tab, section) {
         // Update tab classes
         chatTab.classList.remove('active');
-        modelsTab.classList.remove('active');
         settingsTab.classList.remove('active');
         tab.classList.add('active');
         
         // Update section classes
         chatSection.classList.remove('active-section');
-        modelsSection.classList.remove('active-section');
         settingsSection.classList.remove('active-section');
         section.classList.add('active-section');
     }
@@ -188,40 +178,6 @@ document.addEventListener('DOMContentLoaded', function() {
         })
         .catch(error => {
             alert('Error saving settings: ' + error.message);
-        });
-    });
-    
-    // Model Selection Functionality
-    saveModel.addEventListener('click', function() {
-        const selectedModel = document.querySelector('input[name="model"]:checked');
-        if (!selectedModel) {
-            alert('Please select a model');
-            return;
-        }
-        
-        const modelSettings = {
-            model: selectedModel.value
-        };
-        
-        // Save model selection to backend
-        fetch('/api/model', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(modelSettings)
-        })
-        .then(response => {
-            if (!response.ok) {
-                throw new Error('Network response was not ok');
-            }
-            return response.json();
-        })
-        .then(data => {
-            alert('Model selection saved successfully!');
-        })
-        .catch(error => {
-            alert('Error saving model selection: ' + error.message);
         });
     });
     

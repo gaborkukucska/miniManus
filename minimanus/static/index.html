@@ -13,7 +13,6 @@
             <nav>
                 <ul>
                     <li><a href="#" class="active" id="chat-tab">Chat</a></li>
-                    <li><a href="#" id="models-tab">Models</a></li>
                     <li><a href="#" id="settings-tab">Settings</a></li>
                 </ul>
             </nav>
@@ -32,46 +31,6 @@
                         <textarea id="message-input" placeholder="Type your message here..."></textarea>
                         <button id="send-button">Send</button>
                     </div>
-                </div>
-            </section>
-            
-            <!-- Model Selection Interface -->
-            <section id="models-section" class="section">
-                <h2>Model Selection</h2>
-                <div class="models-container">
-                    <div class="model-group">
-                        <h3>OpenRouter Models</h3>
-                        <div class="model-list" id="openrouter-models">
-                            <div class="model-item">
-                                <input type="radio" name="model" id="openrouter-claude" value="anthropic/claude-3-opus">
-                                <label for="openrouter-claude">Claude 3 Opus</label>
-                            </div>
-                            <div class="model-item">
-                                <input type="radio" name="model" id="openrouter-gpt4" value="openai/gpt-4-turbo" checked>
-                                <label for="openrouter-gpt4">GPT-4 Turbo</label>
-                            </div>
-                            <div class="model-item">
-                                <input type="radio" name="model" id="openrouter-mistral" value="mistralai/mistral-large">
-                                <label for="openrouter-mistral">Mistral Large</label>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="model-group">
-                        <h3>Local Models (Ollama)</h3>
-                        <div class="model-list" id="ollama-models">
-                            <div class="model-item">
-                                <input type="radio" name="model" id="ollama-llama" value="llama3">
-                                <label for="ollama-llama">Llama 3</label>
-                            </div>
-                            <div class="model-item">
-                                <input type="radio" name="model" id="ollama-mistral" value="mistral">
-                                <label for="ollama-mistral">Mistral</label>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <button id="save-model">Save Selection</button>
                 </div>
             </section>
             
@@ -99,7 +58,11 @@
                             </div>
                             <div class="setting-item">
                                 <label for="openrouter-model">Default Model:</label>
-                                <input type="text" id="openrouter-model" value="openai/gpt-4-turbo">
+                                <select id="openrouter-model">
+                                    <option value="anthropic/claude-3-opus">Claude 3 Opus</option>
+                                    <option value="openai/gpt-4-turbo" selected>GPT-4 Turbo</option>
+                                    <option value="mistralai/mistral-large">Mistral Large</option>
+                                </select>
                             </div>
                         </div>
                         
@@ -110,7 +73,11 @@
                             </div>
                             <div class="setting-item">
                                 <label for="anthropic-model">Default Model:</label>
-                                <input type="text" id="anthropic-model" value="claude-3-opus-20240229">
+                                <select id="anthropic-model">
+                                    <option value="claude-3-opus-20240229" selected>Claude 3 Opus</option>
+                                    <option value="claude-3-sonnet-20240229">Claude 3 Sonnet</option>
+                                    <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
+                                </select>
                             </div>
                         </div>
                         
@@ -121,7 +88,10 @@
                             </div>
                             <div class="setting-item">
                                 <label for="deepseek-model">Default Model:</label>
-                                <input type="text" id="deepseek-model" value="deepseek-chat">
+                                <select id="deepseek-model">
+                                    <option value="deepseek-chat" selected>DeepSeek Chat</option>
+                                    <option value="deepseek-coder">DeepSeek Coder</option>
+                                </select>
                             </div>
                         </div>
                         
@@ -132,7 +102,11 @@
                             </div>
                             <div class="setting-item">
                                 <label for="ollama-model">Default Model:</label>
-                                <input type="text" id="ollama-model" value="llama3">
+                                <select id="ollama-model">
+                                    <option value="llama3" selected>Llama 3</option>
+                                    <option value="mistral">Mistral</option>
+                                    <option value="llama2">Llama 2</option>
+                                </select>
                             </div>
                         </div>
                         
@@ -143,7 +117,10 @@
                             </div>
                             <div class="setting-item">
                                 <label for="litellm-model">Default Model:</label>
-                                <input type="text" id="litellm-model" value="gpt-3.5-turbo">
+                                <select id="litellm-model">
+                                    <option value="gpt-3.5-turbo" selected>GPT-3.5 Turbo</option>
+                                    <option value="gpt-4">GPT-4</option>
+                                </select>
                             </div>
                         </div>
                     </div>
@@ -155,7 +132,7 @@
                             <select id="theme">
                                 <option value="system">System Default</option>
                                 <option value="light">Light</option>
-                                <option value="dark">Dark</option>
+                                <option value="dark" selected>Dark</option>
                             </select>
                         </div>
                         <div class="setting-item">

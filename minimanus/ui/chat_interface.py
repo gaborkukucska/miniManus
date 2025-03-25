@@ -4,135 +4,62 @@
 """
 Chat Interface for miniManus
 
-This module implements the Chat Interface component, which provides a mobile-optimized
-chat interface for interacting with LLM models.
+This module implements the Chat Interface component, which manages chat sessions
+and interactions with the user.
 """
 
 import os
 import sys
-import logging
-import asyncio
 import json
+import logging
+import uuid
 import time
-from typing import Dict, List, Optional, Any, Callable, Union
-from enum import Enum, auto
-from pathlib import Path
+import asyncio
+from enum import Enum
+from typing import Dict, List, Optional, Any, Union
+from dataclasses import dataclass, field
 
 # Import local modules
 try:
     from ..core.event_bus import EventBus, Event, EventPriority
     from ..core.error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
     from ..core.config_manager import ConfigurationManager
-    from ..ui.ui_manager import UIManager
+    from ..api.api_manager import APIManager, APIProvider, APIRequestType
+    from ..core.agent_system import AgentSystem
 except ImportError:
     # For standalone testing
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     from core.event_bus import EventBus, Event, EventPriority
     from core.error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
     from core.config_manager import ConfigurationManager
-    from ui.ui_manager import UIManager
+    from api.api_manager import APIManager, APIProvider, APIRequestType
+    from core.agent_system import AgentSystem
 
 logger = logging.getLogger("miniManus.ChatInterface")
 
 class MessageRole(Enum):
-    """Message role types."""
-    USER = auto()
-    ASSISTANT = auto()
-    SYSTEM = auto()
-    FUNCTION = auto()
-    TOOL = auto()
+    """Message roles in a chat session."""
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
 
-class MessageStatus(Enum):
-    """Message status types."""
-    PENDING = auto()
-    SENDING = auto()
-    DELIVERED = auto()
-    ERROR = auto()
-    TYPING = auto()
-
+@dataclass
 class ChatMessage:
-    """Represents a chat message."""
-    
-    def __init__(self, role: MessageRole, content: str, timestamp: Optional[float] = None,
-                status: MessageStatus = MessageStatus.DELIVERED, metadata: Optional[Dict[str, Any]] = None):
-        """
-        Initialize a chat message.
-        
-        Args:
-            role: Role of the message sender
-            content: Message content
-            timestamp: Message timestamp (defaults to current time)
-            status: Message status
-            metadata: Additional message metadata
-        """
-        self.role = role
-        self.content = content
-        self.timestamp = timestamp if timestamp is not None else time.time()
-        self.status = status
-        self.metadata = metadata or {}
-        self.id = f"{int(self.timestamp * 1000)}-{id(self)}"
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Convert message to dictionary.
-        
-        Returns:
-            Dictionary representation of the message
-        """
-        return {
-            "id": self.id,
-            "role": self.role.name.lower(),
-            "content": self.content,
-            "timestamp": self.timestamp,
-            "status": self.status.name.lower(),
-            "metadata": self.metadata
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'ChatMessage':
-        """
-        Create message from dictionary.
-        
-        Args:
-            data: Dictionary representation of the message
-            
-        Returns:
-            ChatMessage instance
-        """
-        role = MessageRole[data["role"].upper()]
-        content = data["content"]
-        timestamp = data.get("timestamp")
-        status = MessageStatus[data.get("status", "DELIVERED").upper()]
-        metadata = data.get("metadata", {})
-        
-        msg = cls(role, content, timestamp, status, metadata)
-        if "id" in data:
-            msg.id = data["id"]
-        
-        return msg
+    """A message in a chat session."""
+    role: MessageRole
+    content: str
+    timestamp: float = field(default_factory=time.time)
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
+@dataclass
 class ChatSession:
-    """Represents a chat session."""
-    
-    def __init__(self, id: str, title: str, model: str, 
-                system_prompt: Optional[str] = None, messages: Optional[List[ChatMessage]] = None):
-        """
-        Initialize a chat session.
-        
-        Args:
-            id: Session ID
-            title: Session title
-            model: Model used for the session
-            system_prompt: System prompt for the session
-            messages: List of messages in the session
-        """
-        self.id = id
-        self.title = title
-        self.model = model
-        self.system_prompt = system_prompt
-        self.messages = messages or []
-        self.created_at = time.time()
-        self.updated_at = time.time()
+    """A chat session with a history of messages."""
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    title: str = "New Chat"
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    messages: List[ChatMessage] = field(default_factory=list)
+    system_prompt: Optional[str] = None
     
     def add_message(self, message: ChatMessage) -> None:
         """
@@ -149,16 +76,23 @@ class ChatSession:
         Convert session to dictionary.
         
         Returns:
-            Dictionary representation of the session
+            Session as dictionary
         """
         return {
             "id": self.id,
             "title": self.title,
-            "model": self.model,
-            "system_prompt": self.system_prompt,
-            "messages": [msg.to_dict() for msg in self.messages],
             "created_at": self.created_at,
-            "updated_at": self.updated_at
+            "updated_at": self.updated_at,
+            "messages": [
+                {
+                    "id": msg.id,
+                    "role": msg.role.value,
+                    "content": msg.content,
+                    "timestamp": msg.timestamp
+                }
+                for msg in self.messages
+            ],
+            "system_prompt": self.system_prompt
         }
     
     @classmethod
@@ -167,32 +101,44 @@ class ChatSession:
         Create session from dictionary.
         
         Args:
-            data: Dictionary representation of the session
+            data: Session data
             
         Returns:
-            ChatSession instance
+            Chat session
         """
-        id = data["id"]
-        title = data["title"]
-        model = data["model"]
-        system_prompt = data.get("system_prompt")
-        messages = [ChatMessage.from_dict(msg) for msg in data.get("messages", [])]
+        session = cls(
+            id=data.get("id", str(uuid.uuid4())),
+            title=data.get("title", "New Chat"),
+            created_at=data.get("created_at", time.time()),
+            updated_at=data.get("updated_at", time.time()),
+            system_prompt=data.get("system_prompt")
+        )
         
-        session = cls(id, title, model, system_prompt, messages)
-        session.created_at = data.get("created_at", session.created_at)
-        session.updated_at = data.get("updated_at", session.updated_at)
+        for msg_data in data.get("messages", []):
+            try:
+                role = MessageRole(msg_data.get("role", "user"))
+            except ValueError:
+                role = MessageRole.USER
+            
+            message = ChatMessage(
+                id=msg_data.get("id", str(uuid.uuid4())),
+                role=role,
+                content=msg_data.get("content", ""),
+                timestamp=msg_data.get("timestamp", time.time())
+            )
+            
+            session.messages.append(message)
         
         return session
 
 class ChatInterface:
     """
-    ChatInterface provides a mobile-optimized chat interface for miniManus.
+    ChatInterface manages chat sessions and interactions with the user.
     
     It handles:
-    - Chat session management
-    - Message sending and receiving
-    - Chat history persistence
-    - Mobile-optimized UI rendering
+    - Chat session creation and management
+    - Message processing and routing
+    - Integration with the agent system
     """
     
     _instance = None  # Singleton instance
@@ -213,172 +159,100 @@ class ChatInterface:
         self.event_bus = EventBus.get_instance()
         self.error_handler = ErrorHandler.get_instance()
         self.config_manager = ConfigurationManager.get_instance()
-        self.ui_manager = UIManager.get_instance()
+        self.api_manager = APIManager.get_instance()
+        
+        # Initialize agent system
+        self.agent_system = AgentSystem.get_instance()
         
         # Chat sessions
         self.sessions: Dict[str, ChatSession] = {}
         self.current_session_id: Optional[str] = None
         
-        # Chat settings
-        self.default_model = self.config_manager.get_config(
-            "chat.default_model", 
-            "gpt-3.5-turbo"
-        )
-        self.default_system_prompt = self.config_manager.get_config(
-            "chat.default_system_prompt", 
-            "You are a helpful assistant."
-        )
-        self.max_history_length = self.config_manager.get_config(
-            "chat.max_history_length", 
-            100
-        )
-        self.auto_save = self.config_manager.get_config(
-            "chat.auto_save", 
-            True
-        )
+        # Load sessions from disk
+        self._load_sessions()
         
-        # Register event handlers
-        self.event_bus.subscribe("chat.message_sent", self._handle_message_sent)
-        self.event_bus.subscribe("chat.message_received", self._handle_message_received)
-        self.event_bus.subscribe("chat.session_created", self._handle_session_created)
-        self.event_bus.subscribe("chat.session_deleted", self._handle_session_deleted)
-        self.event_bus.subscribe("chat.session_selected", self._handle_session_selected)
+        # Create default session if none exists
+        if not self.sessions:
+            default_session = self.create_session("New Chat")
+            self.current_session_id = default_session.id
+        else:
+            # Set current session to most recently updated
+            self.current_session_id = max(
+                self.sessions.items(),
+                key=lambda x: x[1].updated_at
+            )[0]
         
+        self.logger.info(f"Loaded {len(self.sessions)} chat sessions")
         self.logger.info("ChatInterface initialized")
     
-    def create_session(self, title: Optional[str] = None, model: Optional[str] = None,
+    def _load_sessions(self) -> None:
+        """Load chat sessions from disk."""
+        sessions_dir = os.path.join(os.path.dirname(__file__), "../data/sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+        
+        try:
+            for filename in os.listdir(sessions_dir):
+                if filename.endswith(".json"):
+                    file_path = os.path.join(sessions_dir, filename)
+                    try:
+                        with open(file_path, "r") as f:
+                            session_data = json.load(f)
+                            session = ChatSession.from_dict(session_data)
+                            self.sessions[session.id] = session
+                    except Exception as e:
+                        self.logger.error(f"Error loading session {filename}: {str(e)}")
+        except Exception as e:
+            self.logger.error(f"Error loading sessions: {str(e)}")
+    
+    def _save_session(self, session_id: str) -> None:
+        """
+        Save a chat session to disk.
+        
+        Args:
+            session_id: ID of session to save
+        """
+        if session_id not in self.sessions:
+            return
+        
+        session = self.sessions[session_id]
+        sessions_dir = os.path.join(os.path.dirname(__file__), "../data/sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+        
+        file_path = os.path.join(sessions_dir, f"{session_id}.json")
+        
+        try:
+            with open(file_path, "w") as f:
+                json.dump(session.to_dict(), f, indent=2)
+        except Exception as e:
+            self.logger.error(f"Error saving session {session_id}: {str(e)}")
+    
+    def create_session(self, title: str = "New Chat", 
                       system_prompt: Optional[str] = None) -> ChatSession:
         """
         Create a new chat session.
         
         Args:
-            title: Session title (defaults to timestamp)
-            model: Model to use (defaults to default model)
-            system_prompt: System prompt (defaults to default system prompt)
+            title: Session title
+            system_prompt: System prompt for the session
             
         Returns:
-            Created chat session
+            New chat session
         """
-        # Generate session ID
-        session_id = f"session_{int(time.time() * 1000)}"
-        
-        # Set defaults
-        if title is None:
-            title = f"Chat {time.strftime('%Y-%m-%d %H:%M')}"
-        
-        if model is None:
-            model = self.default_model
-        
-        if system_prompt is None:
-            system_prompt = self.default_system_prompt
-        
-        # Create session
-        session = ChatSession(session_id, title, model, system_prompt)
-        
-        # Add system message if system prompt is provided
-        if system_prompt:
-            system_message = ChatMessage(MessageRole.SYSTEM, system_prompt)
-            session.add_message(system_message)
-        
-        # Store session
-        self.sessions[session_id] = session
-        
-        # Set as current session if no current session
-        if self.current_session_id is None:
-            self.current_session_id = session_id
-        
-        # Publish event
-        self.event_bus.publish_event("chat.session_created", {
-            "session_id": session_id,
-            "title": title,
-            "model": model
-        })
-        
-        # Save sessions if auto-save is enabled
-        if self.auto_save:
-            self._save_sessions()
-        
-        self.logger.info(f"Created chat session: {session_id}")
+        session = ChatSession(title=title, system_prompt=system_prompt)
+        self.sessions[session.id] = session
+        self._save_session(session.id)
         return session
     
-    def delete_session(self, session_id: str) -> bool:
+    def get_session(self, session_id: str) -> Optional[ChatSession]:
         """
-        Delete a chat session.
+        Get a chat session by ID.
         
         Args:
-            session_id: ID of the session to delete
-            
-        Returns:
-            True if deleted, False if not found
-        """
-        if session_id not in self.sessions:
-            return False
-        
-        # Remove session
-        del self.sessions[session_id]
-        
-        # Update current session if deleted
-        if self.current_session_id == session_id:
-            if self.sessions:
-                # Set to most recent session
-                self.current_session_id = max(
-                    self.sessions.keys(),
-                    key=lambda sid: self.sessions[sid].updated_at
-                )
-            else:
-                self.current_session_id = None
-        
-        # Publish event
-        self.event_bus.publish_event("chat.session_deleted", {
-            "session_id": session_id
-        })
-        
-        # Save sessions if auto-save is enabled
-        if self.auto_save:
-            self._save_sessions()
-        
-        self.logger.info(f"Deleted chat session: {session_id}")
-        return True
-    
-    def select_session(self, session_id: str) -> bool:
-        """
-        Select a chat session.
-        
-        Args:
-            session_id: ID of the session to select
-            
-        Returns:
-            True if selected, False if not found
-        """
-        if session_id not in self.sessions:
-            return False
-        
-        self.current_session_id = session_id
-        
-        # Publish event
-        self.event_bus.publish_event("chat.session_selected", {
-            "session_id": session_id
-        })
-        
-        self.logger.info(f"Selected chat session: {session_id}")
-        return True
-    
-    def get_session(self, session_id: Optional[str] = None) -> Optional[ChatSession]:
-        """
-        Get a chat session.
-        
-        Args:
-            session_id: ID of the session to get (defaults to current session)
+            session_id: Session ID
             
         Returns:
             Chat session or None if not found
         """
-        if session_id is None:
-            session_id = self.current_session_id
-        
-        if session_id is None:
-            return None
-        
         return self.sessions.get(session_id)
     
     def get_all_sessions(self) -> List[ChatSession]:
@@ -390,317 +264,147 @@ class ChatInterface:
         """
         return list(self.sessions.values())
     
-    def send_message(self, content: str, session_id: Optional[str] = None) -> ChatMessage:
+    def delete_session(self, session_id: str) -> bool:
         """
-        Send a user message.
+        Delete a chat session.
         
         Args:
-            content: Message content
-            session_id: ID of the session to send to (defaults to current session)
+            session_id: Session ID
             
         Returns:
-            Created message
+            True if deleted, False if not found
         """
-        # Get session
-        session = self.get_session(session_id)
-        if session is None:
-            # Create new session if none exists
-            session = self.create_session()
-        
-        # Create message
-        message = ChatMessage(MessageRole.USER, content)
-        
-        # Add to session
-        session.add_message(message)
-        
-        # Publish event
-        self.event_bus.publish_event("chat.message_sent", {
-            "session_id": session.id,
-            "message": message.to_dict()
-        })
-        
-        # Save sessions if auto-save is enabled
-        if self.auto_save:
-            self._save_sessions()
-        
-        self.logger.debug(f"Sent message in session {session.id}")
-        return message
-    
-    def receive_message(self, content: str, session_id: Optional[str] = None,
-                       role: MessageRole = MessageRole.ASSISTANT,
-                       metadata: Optional[Dict[str, Any]] = None) -> ChatMessage:
-        """
-        Receive a message.
-        
-        Args:
-            content: Message content
-            session_id: ID of the session to receive in (defaults to current session)
-            role: Role of the message sender
-            metadata: Additional message metadata
-            
-        Returns:
-            Created message
-        """
-        # Get session
-        session = self.get_session(session_id)
-        if session is None:
-            # Create new session if none exists
-            session = self.create_session()
-        
-        # Create message
-        message = ChatMessage(role, content, metadata=metadata)
-        
-        # Add to session
-        session.add_message(message)
-        
-        # Publish event
-        self.event_bus.publish_event("chat.message_received", {
-            "session_id": session.id,
-            "message": message.to_dict()
-        })
-        
-        # Save sessions if auto-save is enabled
-        if self.auto_save:
-            self._save_sessions()
-        
-        self.logger.debug(f"Received message in session {session.id}")
-        return message
-    
-    def update_message_status(self, message_id: str, status: MessageStatus,
-                            session_id: Optional[str] = None) -> bool:
-        """
-        Update message status.
-        
-        Args:
-            message_id: ID of the message to update
-            status: New status
-            session_id: ID of the session containing the message (defaults to current session)
-            
-        Returns:
-            True if updated, False if not found
-        """
-        # Get session
-        session = self.get_session(session_id)
-        if session is None:
+        if session_id not in self.sessions:
             return False
         
-        # Find message
-        for message in session.messages:
-            if message.id == message_id:
-                message.status = status
-                
-                # Publish event
-                self.event_bus.publish_event("chat.message_status_updated", {
-                    "session_id": session.id,
-                    "message_id": message_id,
-                    "status": status.name.lower()
-                })
-                
-                # Save sessions if auto-save is enabled
-                if self.auto_save:
-                    self._save_sessions()
-                
-                return True
+        del self.sessions[session_id]
         
-        return False
-    
-    def clear_session_history(self, session_id: Optional[str] = None) -> bool:
-        """
-        Clear chat history for a session.
+        # Delete session file
+        sessions_dir = os.path.join(os.path.dirname(__file__), "../data/sessions")
+        file_path = os.path.join(sessions_dir, f"{session_id}.json")
         
-        Args:
-            session_id: ID of the session to clear (defaults to current session)
-            
-        Returns:
-            True if cleared, False if not found
-        """
-        # Get session
-        session = self.get_session(session_id)
-        if session is None:
-            return False
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception as e:
+            self.logger.error(f"Error deleting session file {session_id}: {str(e)}")
         
-        # Keep system message if present
-        system_messages = [msg for msg in session.messages if msg.role == MessageRole.SYSTEM]
-        session.messages = system_messages
+        # Update current session if needed
+        if self.current_session_id == session_id:
+            if self.sessions:
+                self.current_session_id = next(iter(self.sessions.keys()))
+            else:
+                self.current_session_id = None
         
-        # Publish event
-        self.event_bus.publish_event("chat.session_cleared", {
-            "session_id": session.id
-        })
-        
-        # Save sessions if auto-save is enabled
-        if self.auto_save:
-            self._save_sessions()
-        
-        self.logger.info(f"Cleared history for session {session.id}")
         return True
     
-    def _save_sessions(self) -> None:
-        """Save chat sessions to storage."""
+    def set_current_session(self, session_id: str) -> bool:
+        """
+        Set the current chat session.
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            True if set, False if not found
+        """
+        if session_id not in self.sessions:
+            return False
+        
+        self.current_session_id = session_id
+        return True
+    
+    async def process_message(self, message: str, session_id: Optional[str] = None) -> str:
+        """
+        Process a user message.
+        
+        Args:
+            message: User message
+            session_id: Session ID (uses current session if None)
+            
+        Returns:
+            Assistant's response
+        """
+        if session_id is None:
+            session_id = self.current_session_id
+        
+        if session_id is None or session_id not in self.sessions:
+            # Create a new session if none exists
+            session = self.create_session()
+            session_id = session.id
+            self.current_session_id = session_id
+        else:
+            session = self.sessions[session_id]
+        
+        # Add user message to session
+        user_message = ChatMessage(MessageRole.USER, message)
+        session.add_message(user_message)
+        
+        # Save session
+        self._save_session(session_id)
+        
         try:
-            # Create data directory if it doesn't exist
-            data_dir = os.path.join(os.environ.get('HOME', '.'), '.local', 'share', 'minimanus', 'data')
-            os.makedirs(data_dir, exist_ok=True)
+            # Convert messages to format expected by agent system
+            conversation_history = []
             
-            # Save sessions
-            sessions_file = os.path.join(data_dir, 'chat_sessions.json')
+            # Add system message if available
+            if session.system_prompt:
+                conversation_history.append({
+                    "role": "system",
+                    "content": session.system_prompt
+                })
             
-            # Convert sessions to dict
-            sessions_data = {
-                "sessions": {sid: session.to_dict() for sid, session in self.sessions.items()},
-                "current_session_id": self.current_session_id
-            }
+            # Add conversation history (limited to last 10 messages)
+            for msg in session.messages[:-1][-10:]:
+                conversation_history.append({
+                    "role": msg.role.value,
+                    "content": msg.content
+                })
             
-            # Write to file
-            with open(sessions_file, 'w') as f:
-                json.dump(sessions_data, f, indent=2)
-            
-            self.logger.debug("Saved chat sessions")
-        except Exception as e:
-            self.error_handler.handle_error(
-                e, ErrorCategory.STORAGE, ErrorSeverity.WARNING,
-                {"action": "save_chat_sessions"}
-            )
-    
-    def _load_sessions(self) -> None:
-        """Load chat sessions from storage."""
-        try:
-            # Check if sessions file exists
-            data_dir = os.path.join(os.environ.get('HOME', '.'), '.local', 'share', 'minimanus', 'data')
-            sessions_file = os.path.join(data_dir, 'chat_sessions.json')
-            
-            if not os.path.exists(sessions_file):
-                return
-            
-            # Read sessions
-            with open(sessions_file, 'r') as f:
-                sessions_data = json.load(f)
-            
-            # Convert to session objects
-            self.sessions = {
-                sid: ChatSession.from_dict(session_data)
-                for sid, session_data in sessions_data.get("sessions", {}).items()
-            }
-            
-            # Set current session
-            self.current_session_id = sessions_data.get("current_session_id")
-            
-            # Create new session if none loaded
-            if not self.sessions:
-                self.create_session()
-            
-            self.logger.info(f"Loaded {len(self.sessions)} chat sessions")
-        except Exception as e:
-            self.error_handler.handle_error(
-                e, ErrorCategory.STORAGE, ErrorSeverity.WARNING,
-                {"action": "load_chat_sessions"}
+            # Process with agent system
+            response_text = await self.agent_system.process_user_request(
+                message, conversation_history
             )
             
-            # Create default session
-            self.create_session()
-    
-    def _handle_message_sent(self, event: Dict[str, Any]) -> None:
-        """
-        Handle message sent event.
-        
-        Args:
-            event: Event data
-        """
-        session_id = event.get("session_id")
-        message_data = event.get("message")
-        
-        if session_id and message_data:
-            self.logger.debug(f"Message sent in session {session_id}")
-    
-    def _handle_message_received(self, event: Dict[str, Any]) -> None:
-        """
-        Handle message received event.
-        
-        Args:
-            event: Event data
-        """
-        session_id = event.get("session_id")
-        message_data = event.get("message")
-        
-        if session_id and message_data:
-            self.logger.debug(f"Message received in session {session_id}")
-    
-    def _handle_session_created(self, event: Dict[str, Any]) -> None:
-        """
-        Handle session created event.
-        
-        Args:
-            event: Event data
-        """
-        session_id = event.get("session_id")
-        
-        if session_id:
-            self.logger.debug(f"Session created: {session_id}")
-    
-    def _handle_session_deleted(self, event: Dict[str, Any]) -> None:
-        """
-        Handle session deleted event.
-        
-        Args:
-            event: Event data
-        """
-        session_id = event.get("session_id")
-        
-        if session_id:
-            self.logger.debug(f"Session deleted: {session_id}")
-    
-    def _handle_session_selected(self, event: Dict[str, Any]) -> None:
-        """
-        Handle session selected event.
-        
-        Args:
-            event: Event data
-        """
-        session_id = event.get("session_id")
-        
-        if session_id:
-            self.logger.debug(f"Session selected: {session_id}")
+            # Add assistant message to session
+            assistant_message = ChatMessage(MessageRole.ASSISTANT, response_text)
+            session.add_message(assistant_message)
+            
+            # Save session
+            self._save_session(session_id)
+            
+            return response_text
+            
+        except Exception as e:
+            error_msg = str(e)
+            self.logger.error(f"Error processing message: {error_msg}")
+            
+            # Add error message to session
+            error_response = f"I'm sorry, but I encountered an error: {error_msg}"
+            assistant_message = ChatMessage(MessageRole.ASSISTANT, error_response)
+            session.add_message(assistant_message)
+            
+            # Save session
+            self._save_session(session_id)
+            
+            return error_response
     
     def startup(self) -> None:
         """Start the chat interface."""
-        # Load saved sessions
-        self._load_sessions()
+        # Create data directory if it doesn't exist
+        data_dir = os.path.join(os.path.dirname(__file__), "../data")
+        os.makedirs(data_dir, exist_ok=True)
+        
+        # Create sessions directory if it doesn't exist
+        sessions_dir = os.path.join(data_dir, "sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
         
         self.logger.info("ChatInterface started")
     
     def shutdown(self) -> None:
-        """Stop the chat interface."""
-        # Save sessions
-        self._save_sessions()
+        """Shut down the chat interface."""
+        # Save all sessions
+        for session_id in self.sessions:
+            self._save_session(session_id)
         
-        self.logger.info("ChatInterface stopped")
-
-# Example usage
-if __name__ == "__main__":
-    # This is just for demonstration purposes
-    logging.basicConfig(level=logging.INFO)
-    
-    # Initialize required components
-    event_bus = EventBus.get_instance()
-    event_bus.startup()
-    
-    error_handler = ErrorHandler.get_instance()
-    
-    config_manager = ConfigurationManager.get_instance()
-    
-    ui_manager = UIManager.get_instance()
-    ui_manager.startup()
-    
-    # Initialize ChatInterface
-    chat_interface = ChatInterface.get_instance()
-    chat_interface.startup()
-    
-    # Example usage
-    session = chat_interface.create_session("Test Chat", "gpt-3.5-turbo")
-    chat_interface.send_message("Hello, how are you?")
-    chat_interface.receive_message("I'm doing well, thank you for asking!")
-    
-    # Shutdown
-    chat_interface.shutdown()
-    ui_manager.shutdown()
-    event_bus.shutdown()
+        self.logger.info("ChatInterface shut down")
