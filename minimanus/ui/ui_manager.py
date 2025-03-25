@@ -74,6 +74,10 @@ class UIManager:
         
         self.logger.info("UIManager initialized")
     
+    def startup(self):
+        """Start the UI manager (alias for start method for consistency with other components)."""
+        self.start()
+    
     def start(self):
         """Start the UI manager."""
         # Start the web server
