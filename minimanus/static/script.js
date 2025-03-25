@@ -139,7 +139,52 @@ document.addEventListener('DOMContentLoaded', function() {
         // Show selected provider settings
         const selectedProvider = this.value;
         document.getElementById(`${selectedProvider}-settings`).style.display = 'block';
+        
+        // Fetch and populate models for the selected provider
+        fetchModelsForProvider(selectedProvider);
     });
+    
+    // Function to fetch available models for a provider
+    function fetchModelsForProvider(provider) {
+        // Show loading indicator in the model dropdown
+        const modelDropdown = document.getElementById(`${provider}-model`);
+        modelDropdown.innerHTML = '<option value="">Loading models...</option>';
+        
+        fetch(`/api/models?provider=${provider}`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Failed to fetch models');
+                }
+                return response.json();
+            })
+            .then(data => {
+                // Clear the dropdown
+                modelDropdown.innerHTML = '';
+                
+                // Add each model to the dropdown
+                if (data.models && data.models.length > 0) {
+                    data.models.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model.id;
+                        option.textContent = model.name || model.id;
+                        modelDropdown.appendChild(option);
+                    });
+                    
+                    // Select the first model by default
+                    modelDropdown.value = data.models[0].id;
+                } else {
+                    // No models available
+                    const option = document.createElement('option');
+                    option.value = "";
+                    option.textContent = "No models available";
+                    modelDropdown.appendChild(option);
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching models:', error);
+                modelDropdown.innerHTML = '<option value="">Error loading models</option>';
+            });
+    }
     
     saveSettings.addEventListener('click', function() {
         const settings = {
@@ -250,23 +295,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (data.providers) {
                     if (data.providers.openrouter) {
                         document.getElementById('openrouter-api-key').value = data.providers.openrouter.apiKey || '';
-                        document.getElementById('openrouter-model').value = data.providers.openrouter.model || 'openai/gpt-4-turbo';
                     }
                     if (data.providers.anthropic) {
                         document.getElementById('anthropic-api-key').value = data.providers.anthropic.apiKey || '';
-                        document.getElementById('anthropic-model').value = data.providers.anthropic.model || 'claude-3-opus-20240229';
                     }
                     if (data.providers.deepseek) {
                         document.getElementById('deepseek-api-key').value = data.providers.deepseek.apiKey || '';
-                        document.getElementById('deepseek-model').value = data.providers.deepseek.model || 'deepseek-chat';
                     }
                     if (data.providers.ollama) {
                         document.getElementById('ollama-host').value = data.providers.ollama.host || 'http://localhost:11434';
-                        document.getElementById('ollama-model').value = data.providers.ollama.model || 'llama3';
                     }
                     if (data.providers.litellm) {
                         document.getElementById('litellm-host').value = data.providers.litellm.host || 'http://localhost:8000';
-                        document.getElementById('litellm-model').value = data.providers.litellm.model || 'gpt-3.5-turbo';
                     }
                 }
                 
@@ -283,10 +323,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 const fontSize = data.fontSize || 14;
                 fontSizeValue.textContent = fontSize + 'px';
                 document.documentElement.style.setProperty('--font-size', fontSize + 'px');
+                
+                // Fetch models for the selected provider
+                fetchModelsForProvider(defaultProvider.value);
+            } else {
+                // If no settings exist, fetch models for the default provider
+                fetchModelsForProvider(defaultProvider.value);
             }
         })
         .catch(error => {
             console.error('Error loading settings:', error);
+            // Still try to fetch models for the default provider
+            fetchModelsForProvider(defaultProvider.value);
         });
     }
     

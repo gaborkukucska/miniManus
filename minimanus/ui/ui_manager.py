@@ -1,55 +1,36 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-UI Manager for miniManus
-
-This module implements the UI Manager component, which manages the user interface
-for the miniManus framework.
-"""
-
 import os
 import sys
-import logging
 import json
-import threading
-import http.server
-import socketserver
-from typing import Dict, List, Optional, Any, Callable, Union
-from enum import Enum, auto
-from pathlib import Path
+import logging
+import asyncio
+from typing import Dict, List, Any, Optional
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
 
 # Import local modules
 try:
     from ..core.event_bus import EventBus, Event, EventPriority
     from ..core.error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
     from ..core.config_manager import ConfigurationManager
-    from ..api.api_manager import APIManager, APIProvider, APIRequestType
+    from ..api.api_manager import APIManager, APIProvider
 except ImportError:
     # For standalone testing
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     from core.event_bus import EventBus, Event, EventPriority
     from core.error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
     from core.config_manager import ConfigurationManager
-    from api.api_manager import APIManager, APIProvider, APIRequestType
+    from api.api_manager import APIManager, APIProvider
 
 logger = logging.getLogger("miniManus.UIManager")
 
-class UITheme(Enum):
-    """UI themes."""
-    LIGHT = auto()
-    DARK = auto()
-    SYSTEM = auto()
-
 class UIManager:
     """
-    UIManager manages the user interface for the miniManus framework.
+    UIManager handles the web-based user interface for miniManus.
     
-    It handles:
-    - UI initialization
-    - Theme management
-    - UI event handling
-    - UI state management
+    It provides:
+    - Web server for the UI
+    - API endpoints for the UI to interact with the backend
+    - Static file serving for the UI assets
     """
     
     _instance = None  # Singleton instance
@@ -70,542 +51,432 @@ class UIManager:
         self.event_bus = EventBus.get_instance()
         self.error_handler = ErrorHandler.get_instance()
         self.config_manager = ConfigurationManager.get_instance()
+        self.api_manager = APIManager.get_instance()
         
-        # UI state
-        self.theme = UITheme.SYSTEM
-        self.font_size = 14
-        self.animations_enabled = True
+        # Web server configuration
+        self.host = self.config_manager.get_config("ui.host", "localhost")
+        self.port = self.config_manager.get_config("ui.port", 8080)
         
-        # Web server
+        # Static file directory
+        self.static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static"))
+        
+        # Server instance
         self.server = None
         self.server_thread = None
-        self.port = 8080
-        self.host = "localhost"
         
         self.logger.info("UIManager initialized")
     
-    def set_theme(self, theme: UITheme) -> None:
-        """
-        Set the UI theme.
-        
-        Args:
-            theme: Theme to set
-        """
-        self.theme = theme
-        self.logger.debug(f"Set theme to {theme.name}")
-    
-    def set_font_size(self, size: int) -> None:
-        """
-        Set the UI font size.
-        
-        Args:
-            size: Font size to set
-        """
-        self.font_size = size
-        self.logger.debug(f"Set font size to {size}")
-    
-    def toggle_animations(self, enabled: bool) -> None:
-        """
-        Toggle UI animations.
-        
-        Args:
-            enabled: Whether animations are enabled
-        """
-        self.animations_enabled = enabled
-        self.logger.debug(f"Set animations enabled to {enabled}")
-    
-    def startup(self) -> None:
+    def start(self):
         """Start the UI manager."""
-        # Start web server
-        try:
-            # Create custom handler with access to UIManager
-            ui_manager = self
-            
-            class CustomHandler(http.server.SimpleHTTPRequestHandler):
-                """Custom HTTP request handler."""
-                
-                def __init__(self, *args, **kwargs):
-                    super().__init__(*args, directory=os.path.join(os.path.dirname(__file__), "../static"), **kwargs)
-                
-                def log_message(self, format, *args):
-                    """Override to use our logger."""
-                    ui_manager.logger.debug(format % args)
-                
-                def do_GET(self):
-                    """Handle GET requests."""
-                    if self.path == "/":
-                        # Serve index.html
-                        self.path = "/index.html"
-                    elif self.path == "/api/settings":
-                        # Handle GET request for settings
-                        try:
-                            # Get settings from config manager
-                            settings = {
-                                "defaultProvider": ui_manager.config_manager.get_config("api.default_provider", "openrouter"),
-                                "theme": ui_manager.config_manager.get_config("ui.theme", "system"),
-                                "fontSize": ui_manager.config_manager.get_config("ui.font_size", 14),
-                                "animations": ui_manager.config_manager.get_config("ui.animations_enabled", True),
-                                "providers": {
-                                    "openrouter": {
-                                        "apiKey": ui_manager.config_manager.get_config("api.openrouter.api_key", ""),
-                                        "model": ui_manager.config_manager.get_config("api.openrouter.default_model", "openai/gpt-4-turbo")
-                                    },
-                                    "anthropic": {
-                                        "apiKey": ui_manager.config_manager.get_config("api.anthropic.api_key", ""),
-                                        "model": ui_manager.config_manager.get_config("api.anthropic.default_model", "claude-3-opus-20240229")
-                                    },
-                                    "deepseek": {
-                                        "apiKey": ui_manager.config_manager.get_config("api.deepseek.api_key", ""),
-                                        "model": ui_manager.config_manager.get_config("api.deepseek.default_model", "deepseek-chat")
-                                    },
-                                    "ollama": {
-                                        "host": ui_manager.config_manager.get_config("api.ollama.host", "http://localhost:11434"),
-                                        "model": ui_manager.config_manager.get_config("api.ollama.default_model", "llama3")
-                                    },
-                                    "litellm": {
-                                        "host": ui_manager.config_manager.get_config("api.litellm.host", "http://localhost:8000"),
-                                        "model": ui_manager.config_manager.get_config("api.litellm.default_model", "gpt-3.5-turbo")
-                                    }
-                                }
-                            }
-                            
-                            # Send response
-                            self.send_response(200)
-                            self.send_header('Content-type', 'application/json')
-                            self.end_headers()
-                            self.wfile.write(json.dumps(settings).encode('utf-8'))
-                            return
-                        except Exception as e:
-                            ui_manager.logger.error(f"Error handling GET /api/settings: {str(e)}")
-                            self.send_response(500)
-                            self.send_header('Content-type', 'application/json')
-                            self.end_headers()
-                            self.wfile.write(json.dumps({
-                                'status': 'error',
-                                'message': str(e)
-                            }).encode('utf-8'))
-                            return
-                    
-                    try:
-                        super().do_GET()
-                    except FileNotFoundError:
-                        # If file not found in static directory, serve index.html
-                        self.send_response(200)
-                        self.send_header("Content-type", "text/html")
-                        self.end_headers()
-                        
-                        # Read index.html
-                        index_path = os.path.join(os.path.dirname(__file__), "../static/index.html")
-                        if os.path.exists(index_path):
-                            with open(index_path, "rb") as f:
-                                self.wfile.write(f.read())
-                        else:
-                            # Fallback to minimal HTML
-                            html = """
-                            <!DOCTYPE html>
-                            <html>
-                            <head>
-                                <meta charset="UTF-8">
-                                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                                <title>miniManus</title>
-                                <style>
-                                    body {
-                                        font-family: Arial, sans-serif;
-                                        margin: 0;
-                                        padding: 0;
-                                        display: flex;
-                                        flex-direction: column;
-                                        min-height: 100vh;
-                                    }
-                                    header {
-                                        background-color: #4a90e2;
-                                        color: white;
-                                        padding: 1rem;
-                                        text-align: center;
-                                    }
-                                    main {
-                                        flex: 1;
-                                        padding: 1rem;
-                                        max-width: 800px;
-                                        margin: 0 auto;
-                                        width: 100%;
-                                    }
-                                    .chat-container {
-                                        display: flex;
-                                        flex-direction: column;
-                                        height: 70vh;
-                                        border: 1px solid #ddd;
-                                        border-radius: 8px;
-                                        overflow: hidden;
-                                    }
-                                    .chat-messages {
-                                        flex: 1;
-                                        overflow-y: auto;
-                                        padding: 1rem;
-                                        background-color: #f9f9f9;
-                                    }
-                                    .message {
-                                        margin-bottom: 1rem;
-                                        padding: 0.5rem 1rem;
-                                        border-radius: 18px;
-                                        max-width: 80%;
-                                    }
-                                    .user-message {
-                                        background-color: #4a90e2;
-                                        color: white;
-                                        align-self: flex-end;
-                                        margin-left: auto;
-                                    }
-                                    .assistant-message {
-                                        background-color: #e5e5ea;
-                                        color: black;
-                                        align-self: flex-start;
-                                    }
-                                    .chat-input {
-                                        display: flex;
-                                        padding: 0.5rem;
-                                        border-top: 1px solid #ddd;
-                                    }
-                                    .chat-input input {
-                                        flex: 1;
-                                        padding: 0.5rem;
-                                        border: 1px solid #ddd;
-                                        border-radius: 18px;
-                                        margin-right: 0.5rem;
-                                    }
-                                    .chat-input button {
-                                        padding: 0.5rem 1rem;
-                                        background-color: #4a90e2;
-                                        color: white;
-                                        border: none;
-                                        border-radius: 18px;
-                                        cursor: pointer;
-                                    }
-                                </style>
-                            </head>
-                            <body>
-                                <header>
-                                    <h1>miniManus</h1>
-                                </header>
-                                <main>
-                                    <div class="chat-container">
-                                        <div class="chat-messages" id="chat-messages">
-                                            <div class="message assistant-message">
-                                                <div class="message-content">Hello! I'm miniManus. How can I help you today?</div>
-                                            </div>
-                                        </div>
-                                        <div class="chat-input">
-                                            <input type="text" id="message-input" placeholder="Type your message here...">
-                                            <button id="send-button">Send</button>
-                                        </div>
-                                    </div>
-                                </main>
-                                <script>
-                                    document.addEventListener('DOMContentLoaded', () => {
-                                        const messageInput = document.getElementById('message-input');
-                                        const sendButton = document.getElementById('send-button');
-                                        const chatMessages = document.getElementById('chat-messages');
-                                        
-                                        function sendMessage() {
-                                            const message = messageInput.value.trim();
-                                            if (!message) return;
-                                            
-                                            // Add user message to UI
-                                            const userMessageDiv = document.createElement('div');
-                                            userMessageDiv.className = 'message user-message';
-                                            userMessageDiv.innerHTML = `<div class="message-content">${message}</div>`;
-                                            chatMessages.appendChild(userMessageDiv);
-                                            
-                                            // Clear input
-                                            messageInput.value = '';
-                                            
-                                            // Scroll to bottom
-                                            chatMessages.scrollTop = chatMessages.scrollHeight;
-                                            
-                                            // Send to backend API
-                                            fetch('/api/chat', {
-                                                method: 'POST',
-                                                headers: {
-                                                    'Content-Type': 'application/json'
-                                                },
-                                                body: JSON.stringify({ message: message })
-                                            })
-                                            .then(response => response.json())
-                                            .then(data => {
-                                                // Add assistant response
-                                                const assistantMessageDiv = document.createElement('div');
-                                                assistantMessageDiv.className = 'message assistant-message';
-                                                assistantMessageDiv.innerHTML = `<div class="message-content">${data.response}</div>`;
-                                                chatMessages.appendChild(assistantMessageDiv);
-                                                
-                                                // Scroll to bottom
-                                                chatMessages.scrollTop = chatMessages.scrollHeight;
-                                            })
-                                            .catch(error => {
-                                                console.error('Error:', error);
-                                                // Add error message
-                                                const errorMessageDiv = document.createElement('div');
-                                                errorMessageDiv.className = 'message assistant-message';
-                                                errorMessageDiv.innerHTML = `<div class="message-content">Sorry, there was an error processing your request.</div>`;
-                                                chatMessages.appendChild(errorMessageDiv);
-                                                
-                                                // Scroll to bottom
-                                                chatMessages.scrollTop = chatMessages.scrollHeight;
-                                            });
-                                        }
-                                        
-                                        // Event listeners
-                                        sendButton.addEventListener('click', sendMessage);
-                                        
-                                        messageInput.addEventListener('keypress', (e) => {
-                                            if (e.key === 'Enter') {
-                                                sendMessage();
-                                            }
-                                        });
-                                    });
-                                </script>
-                            </body>
-                            </html>
-                            """
-                            self.wfile.write(html.encode())
-                
-                def do_POST(self):
-                    """Handle POST requests."""
-                    try:
-                        if self.path == "/api/chat":
-                            # Get request body
-                            content_length = int(self.headers['Content-Length'])
-                            post_data = self.rfile.read(content_length)
-                            request_data = json.loads(post_data.decode('utf-8'))
-                            
-                            message = request_data.get('message', '')
-                            
-                            # Get the chat interface
-                            from ..ui.chat_interface import ChatInterface, MessageRole, ChatMessage
-                            chat_interface = ChatInterface.get_instance()
-                            
-                            # Create a new session if none exists
-                            if not chat_interface.current_session_id:
-                                session = chat_interface.create_session(title="New Chat")
-                            else:
-                                session = chat_interface.get_session(chat_interface.current_session_id)
-                            
-                            # Add user message to session
-                            user_message = ChatMessage(MessageRole.USER, message)
-                            session.add_message(user_message)
-                            
-                            # Get API manager
-                            api_manager = APIManager.get_instance()
-                            
-                            # Get settings from config
-                            default_provider_name = ui_manager.config_manager.get_config("api.default_provider", "openrouter")
-                            try:
-                                default_provider = APIProvider[default_provider_name.upper()]
-                            except (KeyError, ValueError):
-                                default_provider = APIProvider.OPENROUTER
-                            
-                            # Check if the provider is available
-                            if api_manager.check_provider_availability(default_provider):
-                                # Get provider-specific settings
-                                provider_key = default_provider_name.lower()
-                                api_key = ui_manager.config_manager.get_config(f"api.{provider_key}.api_key", "")
-                                model = ui_manager.config_manager.get_config(f"api.{provider_key}.default_model", "")
-                                temperature = ui_manager.config_manager.get_config("api.temperature", 0.7)
-                                max_tokens = ui_manager.config_manager.get_config("api.max_tokens", 1024)
-                                
-                                # Prepare messages for API
-                                messages = []
-                                
-                                # Add system message if available
-                                if session.system_prompt:
-                                    messages.append({
-                                        "role": "system",
-                                        "content": session.system_prompt
-                                    })
-                                
-                                # Add conversation history (limited to last 10 messages)
-                                for msg in session.messages[-10:]:
-                                    messages.append({
-                                        "role": msg.role.name.lower(),
-                                        "content": msg.content
-                                    })
-                                
-                                try:
-                                    # Get the appropriate adapter
-                                    adapter = api_manager.get_adapter(default_provider)
-                                    
-                                    if adapter:
-                                        # Call the API
-                                        response_text = adapter.generate_text(
-                                            messages=messages,
-                                            model=model,
-                                            temperature=temperature,
-                                            max_tokens=max_tokens,
-                                            api_key=api_key
-                                        )
-                                    else:
-                                        # Fallback if no adapter
-                                        response_text = "I'm sorry, but I couldn't connect to the language model. Please check your API settings."
-                                except Exception as e:
-                                    # Handle API errors
-                                    ui_manager.logger.error(f"API error: {str(e)}")
-                                    response_text = f"I'm sorry, but there was an error communicating with the language model: {str(e)}"
-                            else:
-                                # Provider not available
-                                response_text = f"I'm sorry, but the {default_provider_name} API is not available. Please check your API settings and ensure you've entered a valid API key."
-                            
-                            # Add assistant message to session
-                            assistant_message = ChatMessage(MessageRole.ASSISTANT, response_text)
-                            session.add_message(assistant_message)
-                            
-                            # Prepare response
-                            response = {
-                                'status': 'success',
-                                'response': response_text
-                            }
-                            
-                            # Send response
-                            self.send_response(200)
-                            self.send_header('Content-type', 'application/json')
-                            self.end_headers()
-                            self.wfile.write(json.dumps(response).encode('utf-8'))
-                            
-                            # Log the interaction
-                            ui_manager.logger.info(f"Chat message processed: {message}")
-                            
-                        elif self.path == "/api/settings":
-                            # Handle POST request for settings
-                            content_length = int(self.headers['Content-Length'])
-                            post_data = self.rfile.read(content_length)
-                            settings_data = json.loads(post_data.decode('utf-8'))
-                            
-                            # Update config with new settings
-                            ui_manager.config_manager.set_config("api.default_provider", settings_data.get("defaultProvider", "openrouter"))
-                            ui_manager.config_manager.set_config("ui.theme", settings_data.get("theme", "system"))
-                            ui_manager.config_manager.set_config("ui.font_size", settings_data.get("fontSize", 14))
-                            ui_manager.config_manager.set_config("ui.animations_enabled", settings_data.get("animations", True))
-                            
-                            # Update provider-specific settings
-                            providers = settings_data.get("providers", {})
-                            
-                            if "openrouter" in providers:
-                                ui_manager.config_manager.set_config("api.openrouter.api_key", providers["openrouter"].get("apiKey", ""))
-                                ui_manager.config_manager.set_config("api.openrouter.default_model", providers["openrouter"].get("model", "openai/gpt-4-turbo"))
-                            
-                            if "anthropic" in providers:
-                                ui_manager.config_manager.set_config("api.anthropic.api_key", providers["anthropic"].get("apiKey", ""))
-                                ui_manager.config_manager.set_config("api.anthropic.default_model", providers["anthropic"].get("model", "claude-3-opus-20240229"))
-                            
-                            if "deepseek" in providers:
-                                ui_manager.config_manager.set_config("api.deepseek.api_key", providers["deepseek"].get("apiKey", ""))
-                                ui_manager.config_manager.set_config("api.deepseek.default_model", providers["deepseek"].get("model", "deepseek-chat"))
-                            
-                            if "ollama" in providers:
-                                ui_manager.config_manager.set_config("api.ollama.host", providers["ollama"].get("host", "http://localhost:11434"))
-                                ui_manager.config_manager.set_config("api.ollama.default_model", providers["ollama"].get("model", "llama3"))
-                            
-                            if "litellm" in providers:
-                                ui_manager.config_manager.set_config("api.litellm.host", providers["litellm"].get("host", "http://localhost:8000"))
-                                ui_manager.config_manager.set_config("api.litellm.default_model", providers["litellm"].get("model", "gpt-3.5-turbo"))
-                            
-                            # Save config
-                            ui_manager.config_manager.save_config()
-                            
-                            # Send response
-                            self.send_response(200)
-                            self.send_header('Content-type', 'application/json')
-                            self.end_headers()
-                            self.wfile.write(json.dumps({
-                                'status': 'success',
-                                'message': 'Settings saved successfully'
-                            }).encode('utf-8'))
-                            
-                            ui_manager.logger.info("Settings updated")
-                            
-                        elif self.path == "/api/model":
-                            # Handle POST request for model selection
-                            content_length = int(self.headers['Content-Length'])
-                            post_data = self.rfile.read(content_length)
-                            model_data = json.loads(post_data.decode('utf-8'))
-                            
-                            model = model_data.get('model', '')
-                            
-                            # Determine provider from model
-                            provider = "openrouter"  # Default
-                            
-                            if model.startswith("anthropic/") or "claude" in model:
-                                provider = "anthropic"
-                            elif "llama" in model or "mistral" in model and not model.startswith("mistralai/"):
-                                provider = "ollama"
-                            elif "deepseek" in model:
-                                provider = "deepseek"
-                            
-                            # Update config
-                            ui_manager.config_manager.set_config("api.default_provider", provider)
-                            ui_manager.config_manager.set_config(f"api.{provider}.default_model", model)
-                            
-                            # Save config
-                            ui_manager.config_manager.save_config()
-                            
-                            # Send response
-                            self.send_response(200)
-                            self.send_header('Content-type', 'application/json')
-                            self.end_headers()
-                            self.wfile.write(json.dumps({
-                                'status': 'success',
-                                'message': 'Model selection saved successfully'
-                            }).encode('utf-8'))
-                            
-                            ui_manager.logger.info(f"Model selection updated: {model}")
-                            
-                        else:
-                            # Handle other POST requests
-                            self.send_response(404)
-                            self.end_headers()
-                            self.wfile.write(b'Not Found')
-                    
-                    except Exception as e:
-                        # Log the error
-                        ui_manager.logger.error(f"Error handling POST request: {str(e)}")
-                        
-                        # Send error response
-                        self.send_response(500)
-                        self.send_header('Content-type', 'application/json')
-                        self.end_headers()
-                        self.wfile.write(json.dumps({
-                            'status': 'error',
-                            'message': str(e)
-                        }).encode('utf-8'))
-            
-            # Enable address reuse to prevent "Address already in use" errors
-            socketserver.TCPServer.allow_reuse_address = True
-            
-            # Create and start server
-            self.server = socketserver.TCPServer((self.host, self.port), CustomHandler)
-            self.server_thread = threading.Thread(target=self.server.serve_forever)
-            self.server_thread.daemon = True
-            self.server_thread.start()
-            
-            self.logger.info(f"Web server started at http://{self.host}:{self.port}")
-            print(f"\n\n*** miniManus UI is now available at http://{self.host}:{self.port} ***\n")
-            
-        except Exception as e:
-            self.logger.error(f"Error starting web server: {str(e)}")
-            self.error_handler.handle_error(
-                ErrorCategory.SYSTEM,
-                ErrorSeverity.HIGH,
-                f"Failed to start web server: {str(e)}"
-            )
+        # Start the web server
+        self._start_web_server()
+        
+        # Subscribe to events
+        self.event_bus.subscribe("settings.updated", self._on_settings_updated)
+        
+        self.logger.info("UIManager started")
     
-    def shutdown(self) -> None:
+    def stop(self):
         """Stop the UI manager."""
+        # Stop the web server
         if self.server:
             self.server.shutdown()
+            self.server_thread.join()
             self.server = None
-            self.logger.info("Web server stopped")
-        
-        if self.server_thread and self.server_thread.is_alive():
-            self.server_thread.join(timeout=2.0)
             self.server_thread = None
         
+        # Unsubscribe from events
+        self.event_bus.unsubscribe("settings.updated", self._on_settings_updated)
+        
         self.logger.info("UIManager stopped")
+    
+    def _start_web_server(self):
+        """Start the web server."""
+        # Create a request handler with access to the UIManager instance
+        ui_manager = self
+        
+        class RequestHandler(BaseHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                self.ui_manager = ui_manager
+                super().__init__(*args, **kwargs)
+            
+            def log_message(self, format, *args):
+                # Redirect log messages to our logger
+                ui_manager.logger.debug(format % args)
+            
+            def do_GET(self):
+                """Handle GET requests."""
+                try:
+                    # Parse the URL
+                    parsed_url = urlparse(self.path)
+                    path = parsed_url.path
+                    
+                    # API endpoints
+                    if path.startswith("/api/"):
+                        if path == "/api/settings":
+                            self._handle_get_settings()
+                        elif path == "/api/models":
+                            self._handle_get_models(parsed_url)
+                        else:
+                            self.send_error(404, "API endpoint not found")
+                    
+                    # Static files
+                    else:
+                        self._serve_static_file(path)
+                
+                except Exception as e:
+                    ui_manager.error_handler.handle_error(
+                        e, ErrorCategory.UI, ErrorSeverity.ERROR,
+                        {"path": self.path, "method": "GET"}
+                    )
+                    self.send_error(500, str(e))
+            
+            def do_POST(self):
+                """Handle POST requests."""
+                try:
+                    # Parse the URL
+                    parsed_url = urlparse(self.path)
+                    path = parsed_url.path
+                    
+                    # Get the request body
+                    content_length = int(self.headers.get("Content-Length", 0))
+                    body = self.rfile.read(content_length).decode("utf-8")
+                    
+                    # Parse JSON body
+                    if content_length > 0:
+                        try:
+                            body = json.loads(body)
+                        except json.JSONDecodeError:
+                            self.send_error(400, "Invalid JSON")
+                            return
+                    
+                    # API endpoints
+                    if path == "/api/settings":
+                        self._handle_post_settings(body)
+                    elif path == "/api/chat":
+                        self._handle_post_chat(body)
+                    elif path == "/api/model":
+                        self._handle_post_model(body)
+                    else:
+                        self.send_error(404, "API endpoint not found")
+                
+                except Exception as e:
+                    ui_manager.error_handler.handle_error(
+                        e, ErrorCategory.UI, ErrorSeverity.ERROR,
+                        {"path": self.path, "method": "POST"}
+                    )
+                    self.send_error(500, str(e))
+            
+            def _handle_get_settings(self):
+                """Handle GET /api/settings."""
+                # Get the settings from the config manager
+                settings = ui_manager.config_manager.get_all_config()
+                
+                # Send the response
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(settings).encode("utf-8"))
+            
+            def _handle_get_models(self, parsed_url):
+                """Handle GET /api/models."""
+                # Parse query parameters
+                query = parse_qs(parsed_url.query)
+                provider = query.get("provider", ["openrouter"])[0]
+                
+                # Get models for the provider
+                models = ui_manager._get_models_for_provider(provider)
+                
+                # Send the response
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"models": models}).encode("utf-8"))
+            
+            def _handle_post_settings(self, body):
+                """Handle POST /api/settings."""
+                # Update the settings in the config manager
+                ui_manager.config_manager.update_config(body)
+                
+                # Save the settings
+                ui_manager.config_manager.save_config()
+                
+                # Publish an event
+                ui_manager.event_bus.publish(
+                    Event("settings.updated", {"settings": body})
+                )
+                
+                # Send the response
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": True}).encode("utf-8"))
+                
+                ui_manager.logger.info("Settings updated")
+            
+            def _handle_post_chat(self, body):
+                """Handle POST /api/chat."""
+                # Get the message from the request body
+                message = body.get("message", "")
+                
+                # Process the message
+                response = ui_manager._process_chat_message(message)
+                
+                # Send the response
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"response": response}).encode("utf-8"))
+                
+                ui_manager.logger.info(f"Chat message processed: {message}")
+            
+            def _handle_post_model(self, body):
+                """Handle POST /api/model."""
+                # Get the model from the request body
+                model = body.get("model", "")
+                provider = body.get("provider", "")
+                
+                # Update the model in the config manager
+                if provider:
+                    ui_manager.config_manager.update_config({
+                        "providers": {
+                            provider: {
+                                "model": model
+                            }
+                        }
+                    })
+                    
+                    # Save the settings
+                    ui_manager.config_manager.save_config()
+                    
+                    # Publish an event
+                    ui_manager.event_bus.publish(
+                        Event("model.updated", {"provider": provider, "model": model})
+                    )
+                
+                # Send the response
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": True}).encode("utf-8"))
+                
+                ui_manager.logger.info(f"Model updated: {provider}/{model}")
+            
+            def _serve_static_file(self, path):
+                """Serve a static file."""
+                # Map the URL path to a file path
+                if path == "/" or path == "":
+                    file_path = os.path.join(ui_manager.static_dir, "index.html")
+                else:
+                    # Remove leading slash
+                    path = path[1:] if path.startswith("/") else path
+                    file_path = os.path.join(ui_manager.static_dir, path)
+                
+                # Check if the file exists
+                if not os.path.isfile(file_path):
+                    # Try index.html for directories
+                    if os.path.isdir(file_path):
+                        file_path = os.path.join(file_path, "index.html")
+                        if not os.path.isfile(file_path):
+                            self.send_error(404, "File not found")
+                            return
+                    else:
+                        self.send_error(404, "File not found")
+                        return
+                
+                # Determine the content type
+                content_type = self._get_content_type(file_path)
+                
+                # Send the file
+                try:
+                    with open(file_path, "rb") as f:
+                        content = f.read()
+                    
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+                
+                except Exception as e:
+                    ui_manager.error_handler.handle_error(
+                        e, ErrorCategory.UI, ErrorSeverity.ERROR,
+                        {"path": path, "file_path": file_path}
+                    )
+                    self.send_error(500, str(e))
+            
+            def _get_content_type(self, file_path):
+                """Get the content type for a file."""
+                # Map file extensions to content types
+                content_types = {
+                    ".html": "text/html",
+                    ".css": "text/css",
+                    ".js": "application/javascript",
+                    ".json": "application/json",
+                    ".png": "image/png",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".gif": "image/gif",
+                    ".svg": "image/svg+xml",
+                    ".ico": "image/x-icon",
+                }
+                
+                # Get the file extension
+                _, ext = os.path.splitext(file_path)
+                
+                # Return the content type
+                return content_types.get(ext.lower(), "application/octet-stream")
+        
+        # Create and start the server
+        self.server = HTTPServer((self.host, self.port), RequestHandler)
+        
+        # Start the server in a separate thread
+        self.server_thread = threading.Thread(target=self.server.serve_forever)
+        self.server_thread.daemon = True
+        self.server_thread.start()
+        
+        self.logger.info(f"Web server started at http://{self.host}:{self.port}")
+    
+    def _on_settings_updated(self, event):
+        """Handle settings.updated event."""
+        # Nothing to do here for now
+        pass
+    
+    def _process_chat_message(self, message):
+        """Process a chat message."""
+        try:
+            # Get the default provider from config
+            provider_name = self.config_manager.get_config("defaultProvider", "openrouter")
+            
+            # Map provider name to APIProvider enum
+            provider_map = {
+                "openrouter": APIProvider.OPENROUTER,
+                "anthropic": APIProvider.ANTHROPIC,
+                "deepseek": APIProvider.DEEPSEEK,
+                "ollama": APIProvider.OLLAMA,
+                "litellm": APIProvider.LITELLM,
+            }
+            
+            provider = provider_map.get(provider_name, APIProvider.OPENROUTER)
+            
+            # Get the adapter for the provider
+            adapter = self.api_manager.get_adapter(provider)
+            
+            if not adapter:
+                return "I'm sorry, but the selected API provider is not available. Please check your settings."
+            
+            # Get the model from config
+            model = None
+            if provider_name == "openrouter":
+                model = self.config_manager.get_config("providers.openrouter.model")
+            elif provider_name == "anthropic":
+                model = self.config_manager.get_config("providers.anthropic.model")
+            elif provider_name == "deepseek":
+                model = self.config_manager.get_config("providers.deepseek.model")
+            elif provider_name == "ollama":
+                model = self.config_manager.get_config("providers.ollama.model")
+            elif provider_name == "litellm":
+                model = self.config_manager.get_config("providers.litellm.model")
+            
+            # Format the message for the provider
+            messages = [
+                {"role": "system", "content": "You are miniManus, a helpful AI assistant running on a mobile device."},
+                {"role": "user", "content": message}
+            ]
+            
+            # Generate a response
+            if hasattr(adapter, 'generate_text'):
+                response = adapter.generate_text(messages, model=model)
+                return response
+            else:
+                return "I'm sorry, but the selected API provider does not support text generation."
+        
+        except Exception as e:
+            self.error_handler.handle_error(
+                e, ErrorCategory.API, ErrorSeverity.ERROR,
+                {"message": message}
+            )
+            return f"I'm sorry, but there was an error processing your request: {str(e)}"
+    
+    def _get_models_for_provider(self, provider_name):
+        """Get available models for a provider."""
+        try:
+            # Map provider name to APIProvider enum
+            provider_map = {
+                "openrouter": APIProvider.OPENROUTER,
+                "anthropic": APIProvider.ANTHROPIC,
+                "deepseek": APIProvider.DEEPSEEK,
+                "ollama": APIProvider.OLLAMA,
+                "litellm": APIProvider.LITELLM,
+            }
+            
+            provider = provider_map.get(provider_name)
+            if not provider:
+                return []
+            
+            # Get the adapter for the provider
+            adapter = self.api_manager.get_adapter(provider)
+            if not adapter:
+                return []
+            
+            # Get available models
+            if hasattr(adapter, 'get_available_models'):
+                # Run the async method in a new event loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    models = loop.run_until_complete(adapter.get_available_models())
+                finally:
+                    loop.close()
+                return models
+            else:
+                # Return default models for providers without a get_available_models method
+                if provider_name == "openrouter":
+                    return [
+                        {"id": "anthropic/claude-3-opus", "name": "Claude 3 Opus"},
+                        {"id": "openai/gpt-4-turbo", "name": "GPT-4 Turbo"},
+                        {"id": "mistralai/mistral-large", "name": "Mistral Large"}
+                    ]
+                elif provider_name == "anthropic":
+                    return [
+                        {"id": "claude-3-opus-20240229", "name": "Claude 3 Opus"},
+                        {"id": "claude-3-sonnet-20240229", "name": "Claude 3 Sonnet"},
+                        {"id": "claude-3-haiku-20240307", "name": "Claude 3 Haiku"}
+                    ]
+                elif provider_name == "deepseek":
+                    return [
+                        {"id": "deepseek-chat", "name": "DeepSeek Chat"},
+                        {"id": "deepseek-coder", "name": "DeepSeek Coder"}
+                    ]
+                elif provider_name == "ollama":
+                    return [
+                        {"id": "llama3", "name": "Llama 3"},
+                        {"id": "mistral", "name": "Mistral"},
+                        {"id": "llama2", "name": "Llama 2"}
+                    ]
+                elif provider_name == "litellm":
+                    return [
+                        {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo"},
+                        {"id": "gpt-4", "name": "GPT-4"}
+                    ]
+                else:
+                    return []
+        
+        except Exception as e:
+            self.error_handler.handle_error(
+                e, ErrorCategory.API, ErrorSeverity.ERROR,
+                {"provider": provider_name}
+            )
+            return []
+
+# For standalone testing
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG)
+    ui_manager = UIManager.get_instance()
+    ui_manager.start()
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        ui_manager.stop()
