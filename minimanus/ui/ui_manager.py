@@ -3,9 +3,11 @@ import sys
 import json
 import logging
 import asyncio
+import threading
 from typing import Dict, List, Any, Optional
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
+from enum import Enum, auto
 
 # Import local modules
 try:
@@ -22,6 +24,12 @@ except ImportError:
     from api.api_manager import APIManager, APIProvider
 
 logger = logging.getLogger("miniManus.UIManager")
+
+class UITheme(Enum):
+    """UI theme options."""
+    LIGHT = auto()
+    DARK = auto()
+    SYSTEM = auto()
 
 class UIManager:
     """
