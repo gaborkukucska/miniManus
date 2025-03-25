@@ -4,8 +4,8 @@
 """
 UI Manager for miniManus
 
-This module implements the UI Manager component, which coordinates all UI interactions,
-manages UI state, handles user input and output, and provides a responsive mobile interface.
+This module implements the UI Manager component, which manages the user interface
+for the miniManus framework.
 """
 
 import os
@@ -15,7 +15,6 @@ import json
 import threading
 import http.server
 import socketserver
-import time
 from typing import Dict, List, Optional, Any, Callable, Union
 from enum import Enum, auto
 from pathlib import Path
@@ -44,14 +43,13 @@ class UITheme(Enum):
 
 class UIManager:
     """
-    UIManager coordinates all UI interactions for miniManus.
+    UIManager manages the user interface for the miniManus framework.
     
     It handles:
-    - UI state management
-    - User input and output
+    - UI initialization
     - Theme management
-    - UI component coordination
-    - Web server for UI rendering
+    - UI event handling
+    - UI state management
     """
     
     _instance = None  # Singleton instance
@@ -73,67 +71,18 @@ class UIManager:
         self.error_handler = ErrorHandler.get_instance()
         self.config_manager = ConfigurationManager.get_instance()
         
-        # UI settings
-        self.theme = UITheme[self.config_manager.get_config(
-            "ui.theme", 
-            UITheme.SYSTEM.name
-        )]
-        
-        self.font_size = self.config_manager.get_config("ui.font_size", 14)
-        self.enable_animations = self.config_manager.get_config("ui.enable_animations", True)
-        self.compact_mode = self.config_manager.get_config("ui.compact_mode", False)
-        
-        # UI components
-        self.components = {}
-        
         # UI state
-        self.state = {
-            "current_view": "chat",
-            "is_processing": False,
-            "notification_count": 0,
-            "error_count": 0,
-        }
+        self.theme = UITheme.SYSTEM
+        self.font_size = 14
+        self.animations_enabled = True
         
         # Web server
         self.server = None
         self.server_thread = None
-        self.port = self.config_manager.get_config("ui.port", 8080)
-        self.host = self.config_manager.get_config("ui.host", "localhost")
-        self.httpd = None
-        
-        # Register event handlers
-        self.event_bus.subscribe("ui.theme_changed", self._handle_theme_changed)
-        self.event_bus.subscribe("ui.font_size_changed", self._handle_font_size_changed)
-        self.event_bus.subscribe("ui.animations_toggled", self._handle_animations_toggled)
-        self.event_bus.subscribe("ui.compact_mode_toggled", self._handle_compact_mode_toggled)
-        self.event_bus.subscribe("ui.view_changed", self._handle_view_changed)
-        self.event_bus.subscribe("ui.notification", self._handle_notification)
-        self.event_bus.subscribe("ui.error", self._handle_error)
+        self.port = 8080
+        self.host = "localhost"
         
         self.logger.info("UIManager initialized")
-    
-    def register_component(self, name: str, component: Any) -> None:
-        """
-        Register a UI component.
-        
-        Args:
-            name: Name of the component
-            component: Component instance
-        """
-        self.components[name] = component
-        self.logger.debug(f"Registered UI component: {name}")
-    
-    def get_component(self, name: str) -> Optional[Any]:
-        """
-        Get a UI component.
-        
-        Args:
-            name: Name of the component
-            
-        Returns:
-            Component instance or None if not registered
-        """
-        return self.components.get(name)
     
     def set_theme(self, theme: UITheme) -> None:
         """
@@ -142,11 +91,8 @@ class UIManager:
         Args:
             theme: Theme to set
         """
-        if theme != self.theme:
-            self.theme = theme
-            self.config_manager.set_config("ui.theme", theme.name)
-            self.event_bus.publish_event("ui.theme_changed", {"theme": theme.name})
-            self.logger.info(f"Theme changed to {theme.name}")
+        self.theme = theme
+        self.logger.debug(f"Set theme to {theme.name}")
     
     def set_font_size(self, size: int) -> None:
         """
@@ -155,699 +101,511 @@ class UIManager:
         Args:
             size: Font size to set
         """
-        if size != self.font_size:
-            self.font_size = size
-            self.config_manager.set_config("ui.font_size", size)
-            self.event_bus.publish_event("ui.font_size_changed", {"size": size})
-            self.logger.info(f"Font size changed to {size}")
+        self.font_size = size
+        self.logger.debug(f"Set font size to {size}")
     
-    def toggle_animations(self, enable: bool) -> None:
+    def toggle_animations(self, enabled: bool) -> None:
         """
         Toggle UI animations.
         
         Args:
-            enable: Whether to enable animations
+            enabled: Whether animations are enabled
         """
-        if enable != self.enable_animations:
-            self.enable_animations = enable
-            self.config_manager.set_config("ui.enable_animations", enable)
-            self.event_bus.publish_event("ui.animations_toggled", {"enabled": enable})
-            self.logger.info(f"Animations {'enabled' if enable else 'disabled'}")
-    
-    def toggle_compact_mode(self, enable: bool) -> None:
-        """
-        Toggle UI compact mode.
-        
-        Args:
-            enable: Whether to enable compact mode
-        """
-        if enable != self.compact_mode:
-            self.compact_mode = enable
-            self.config_manager.set_config("ui.compact_mode", enable)
-            self.event_bus.publish_event("ui.compact_mode_toggled", {"enabled": enable})
-            self.logger.info(f"Compact mode {'enabled' if enable else 'disabled'}")
-    
-    def change_view(self, view: str) -> None:
-        """
-        Change the current UI view.
-        
-        Args:
-            view: View to change to
-        """
-        if view != self.state["current_view"]:
-            self.state["current_view"] = view
-            self.event_bus.publish_event("ui.view_changed", {"view": view})
-            self.logger.info(f"View changed to {view}")
-    
-    def show_notification(self, message: str, level: str = "info", duration: int = 3000) -> None:
-        """
-        Show a notification.
-        
-        Args:
-            message: Notification message
-            level: Notification level (info, warning, error)
-            duration: Duration in milliseconds
-        """
-        self.state["notification_count"] += 1
-        self.event_bus.publish_event("ui.notification", {
-            "message": message,
-            "level": level,
-            "duration": duration,
-        })
-        self.logger.debug(f"Notification shown: {message}")
-    
-    def show_error(self, message: str, details: Optional[str] = None) -> None:
-        """
-        Show an error message.
-        
-        Args:
-            message: Error message
-            details: Error details
-        """
-        self.state["error_count"] += 1
-        self.event_bus.publish_event("ui.error", {
-            "message": message,
-            "details": details,
-        })
-        self.logger.debug(f"Error shown: {message}")
-    
-    def set_processing_state(self, is_processing: bool) -> None:
-        """
-        Set the processing state.
-        
-        Args:
-            is_processing: Whether the system is processing
-        """
-        if is_processing != self.state["is_processing"]:
-            self.state["is_processing"] = is_processing
-            self.event_bus.publish_event("ui.processing_state_changed", {"is_processing": is_processing})
-            self.logger.debug(f"Processing state changed to {is_processing}")
-    
-    def _handle_theme_changed(self, event: Dict[str, Any]) -> None:
-        """
-        Handle theme changed event.
-        
-        Args:
-            event: Event data
-        """
-        theme_name = event.get("theme")
-        try:
-            self.theme = UITheme[theme_name]
-            self.logger.debug(f"Theme updated to {theme_name}")
-        except (KeyError, ValueError):
-            self.logger.warning(f"Invalid theme: {theme_name}")
-    
-    def _handle_font_size_changed(self, event: Dict[str, Any]) -> None:
-        """
-        Handle font size changed event.
-        
-        Args:
-            event: Event data
-        """
-        size = event.get("size")
-        if isinstance(size, (int, float)):
-            self.font_size = size
-            self.logger.debug(f"Font size updated to {size}")
-    
-    def _handle_animations_toggled(self, event: Dict[str, Any]) -> None:
-        """
-        Handle animations toggled event.
-        
-        Args:
-            event: Event data
-        """
-        enabled = event.get("enabled")
-        if isinstance(enabled, bool):
-            self.enable_animations = enabled
-            self.logger.debug(f"Animations {'enabled' if enabled else 'disabled'}")
-    
-    def _handle_compact_mode_toggled(self, event: Dict[str, Any]) -> None:
-        """
-        Handle compact mode toggled event.
-        
-        Args:
-            event: Event data
-        """
-        enabled = event.get("enabled")
-        if isinstance(enabled, bool):
-            self.compact_mode = enabled
-            self.logger.debug(f"Compact mode {'enabled' if enabled else 'disabled'}")
-    
-    def _handle_view_changed(self, event: Dict[str, Any]) -> None:
-        """
-        Handle view changed event.
-        
-        Args:
-            event: Event data
-        """
-        view = event.get("view")
-        if isinstance(view, str):
-            self.state["current_view"] = view
-            self.logger.debug(f"View updated to {view}")
-    
-    def _handle_notification(self, event: Dict[str, Any]) -> None:
-        """
-        Handle notification event.
-        
-        Args:
-            event: Event data
-        """
-        self.state["notification_count"] += 1
-        self.logger.debug(f"Notification received: {event.get('message')}")
-    
-    def _handle_error(self, event: Dict[str, Any]) -> None:
-        """
-        Handle error event.
-        
-        Args:
-            event: Event data
-        """
-        self.state["error_count"] += 1
-        self.logger.debug(f"Error received: {event.get('message')}")
-    
-    def _get_static_file_path(self, path: str) -> str:
-        """
-        Get the absolute path to a static file.
-        
-        Args:
-            path: Relative path to the file
-            
-        Returns:
-            Absolute path to the file
-        """
-        # Find the static directory
-        module_dir = os.path.dirname(os.path.abspath(__file__))
-        static_dir = os.path.join(module_dir, "..", "..", "static")
-        
-        # If static directory doesn't exist at the expected location, try alternative locations
-        if not os.path.isdir(static_dir):
-            static_dir = os.path.join(module_dir, "..", "static")
-            if not os.path.isdir(static_dir):
-                static_dir = os.path.join(os.path.dirname(module_dir), "static")
-                if not os.path.isdir(static_dir):
-                    # Last resort, create a basic static dir
-                    os.makedirs(static_dir, exist_ok=True)
-                    self._create_default_static_files(static_dir)
-        
-        return os.path.join(static_dir, path.lstrip('/'))
-    
-    def _create_default_static_files(self, static_dir: str) -> None:
-        """
-        Create default static files if they don't exist.
-        
-        Args:
-            static_dir: Directory to create files in
-        """
-        # Create default index.html
-        index_html = """<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>miniManus</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 0;
-            display: flex;
-            flex-direction: column;
-            min-height: 100vh;
-            background-color: #f5f5f5;
-        }
-        header {
-            background-color: #4a90e2;
-            color: white;
-            padding: 1rem;
-            text-align: center;
-        }
-        main {
-            flex: 1;
-            padding: 1rem;
-            max-width: 800px;
-            margin: 0 auto;
-            width: 100%;
-        }
-        .chat-container {
-            display: flex;
-            flex-direction: column;
-            height: 70vh;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            overflow: hidden;
-            background-color: white;
-        }
-        .chat-messages {
-            flex: 1;
-            overflow-y: auto;
-            padding: 1rem;
-            background-color: #f9f9f9;
-        }
-        .message {
-            margin-bottom: 1rem;
-            padding: 0.5rem 1rem;
-            border-radius: 18px;
-            max-width: 80%;
-        }
-        .user-message {
-            background-color: #4a90e2;
-            color: white;
-            align-self: flex-end;
-            margin-left: auto;
-            text-align: right;
-        }
-        .assistant-message {
-            background-color: #e5e5ea;
-            color: black;
-            align-self: flex-start;
-        }
-        .chat-input {
-            display: flex;
-            padding: 0.5rem;
-            border-top: 1px solid #ddd;
-            background-color: white;
-        }
-        .chat-input input {
-            flex: 1;
-            padding: 0.5rem;
-            border: 1px solid #ddd;
-            border-radius: 18px;
-            margin-right: 0.5rem;
-        }
-        .chat-input button {
-            padding: 0.5rem 1rem;
-            background-color: #4a90e2;
-            color: white;
-            border: none;
-            border-radius: 18px;
-            cursor: pointer;
-        }
-        .chat-messages-container {
-            display: flex;
-            flex-direction: column;
-        }
-        .timestamp {
-            font-size: 0.8em;
-            color: #888;
-            margin-top: 0.2rem;
-        }
-        .settings-panel {
-            background-color: white;
-            border-radius: 8px;
-            padding: 1rem;
-            margin-bottom: 1rem;
-        }
-        .settings-panel h2 {
-            margin-top: 0;
-        }
-        .settings-group {
-            margin-bottom: 1rem;
-        }
-        .settings-group h3 {
-            margin-bottom: 0.5rem;
-        }
-        .setting-item {
-            margin-bottom: 0.5rem;
-            display: flex;
-            flex-direction: column;
-        }
-        .setting-item label {
-            margin-bottom: 0.3rem;
-        }
-        .models-list {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-            gap: 1rem;
-        }
-        .model-card {
-            background-color: white;
-            border-radius: 8px;
-            padding: 1rem;
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-        .model-card:hover {
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-        }
-        .model-card h3 {
-            margin-top: 0;
-            margin-bottom: 0.5rem;
-        }
-        .model-card p {
-            margin: 0;
-            font-size: 0.9rem;
-            color: #555;
-        }
-        .navigation {
-            display: flex;
-            justify-content: space-between;
-            background-color: white;
-            border-radius: 8px;
-            overflow: hidden;
-            margin-bottom: 1rem;
-        }
-        .nav-item {
-            flex: 1;
-            text-align: center;
-            padding: 0.8rem;
-            cursor: pointer;
-        }
-        .nav-item.active {
-            background-color: #4a90e2;
-            color: white;
-        }
-        .notification {
-            position: fixed;
-            top: 1rem;
-            right: 1rem;
-            padding: 0.8rem 1rem;
-            border-radius: 4px;
-            background-color: #4a90e2;
-            color: white;
-            z-index: 1000;
-            animation: fadeOut 0.3s ease-in-out 2.7s forwards;
-        }
-        @keyframes fadeOut {
-            from { opacity: 1; }
-            to { opacity: 0; }
-        }
-    </style>
-</head>
-<body>
-    <header>
-        <h1>miniManus</h1>
-    </header>
-    <main>
-        <div class="navigation">
-            <div class="nav-item active" data-view="chat">Chat</div>
-            <div class="nav-item" data-view="models">Models</div>
-            <div class="nav-item" data-view="settings">Settings</div>
-            <div class="nav-item" data-view="info">Info</div>
-        </div>
-        
-        <div id="chat-view">
-            <div class="chat-container">
-                <div class="chat-messages" id="chat-messages">
-                    <div class="chat-messages-container">
-                        <div class="message assistant-message">
-                            <p>Hello! I'm miniManus. How can I help you today?</p>
-                            <div class="timestamp">Just now</div>
-                        </div>
-                    </div>
-                </div>
-                <div class="chat-input">
-                    <input type="text" id="message-input" placeholder="Type your message...">
-                    <button id="send-button">Send</button>
-                </div>
-            </div>
-        </div>
-        
-        <div id="models-view" style="display: none;">
-            <h2>Available Models</h2>
-            <div class="models-list" id="models-list">
-                <div class="model-card">
-                    <h3>Loading models...</h3>
-                    <p>Please wait while we fetch available models</p>
-                </div>
-            </div>
-        </div>
-        
-        <div id="settings-view" style="display: none;">
-            <div class="settings-panel">
-                <h2>Settings</h2>
-                
-                <div class="settings-group">
-                    <h3>Appearance</h3>
-                    <div class="setting-item">
-                        <label for="theme-select">Theme</label>
-                        <select id="theme-select">
-                            <option value="LIGHT">Light</option>
-                            <option value="DARK" selected>Dark</option>
-                            <option value="SYSTEM">System</option>
-                        </select>
-                    </div>
-                    <div class="setting-item">
-                        <label for="font-size">Font Size</label>
-                        <input type="range" id="font-size" min="12" max="24" value="16">
-                        <span id="font-size-value">16px</span>
-                    </div>
-                    <div class="setting-item">
-                        <label>
-                            <input type="checkbox" id="animations-toggle" checked>
-                            Enable Animations
-                        </label>
-                    </div>
-                    <div class="setting-item">
-                        <label>
-                            <input type="checkbox" id="compact-mode-toggle">
-                            Compact Mode
-                        </label>
-                    </div>
-                </div>
-                
-                <div class="settings-group">
-                    <h3>API Settings</h3>
-                    <div class="setting-item">
-                        <label for="api-provider">Default Provider</label>
-                        <select id="api-provider">
-                            <option value="openrouter" selected>OpenRouter</option>
-                            <option value="deepseek">DeepSeek</option>
-                            <option value="anthropic">Anthropic</option>
-                            <option value="ollama">Ollama</option>
-                            <option value="litellm">LiteLLM</option>
-                        </select>
-                    </div>
-                    <div class="setting-item">
-                        <label for="api-key">API Key</label>
-                        <input type="password" id="api-key" placeholder="Enter API key">
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <div id="info-view" style="display: none;">
-            <div class="settings-panel">
-                <h2>About miniManus</h2>
-                <p>miniManus is a mobile-focused framework that runs on Linux in Termux for Android phones.</p>
-                <p>Version: 0.1.0</p>
-                <p>Created by: miniManus Team</p>
-                
-                <h3>Support</h3>
-                <p>For help and support, please visit:</p>
-                <p><a href="https://github.com/yourusername/miniManus" target="_blank">GitHub Repository</a></p>
-            </div>
-        </div>
-    </main>
-    
-    <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            const messagesContainer = document.getElementById('chat-messages');
-            const messageInput = document.getElementById('message-input');
-            const sendButton = document.getElementById('send-button');
-            const navItems = document.querySelectorAll('.nav-item');
-            const views = {
-                chat: document.getElementById('chat-view'),
-                models: document.getElementById('models-view'),
-                settings: document.getElementById('settings-view'),
-                info: document.getElementById('info-view')
-            };
-            
-            // Navigation
-            navItems.forEach(item => {
-                item.addEventListener('click', () => {
-                    const view = item.getAttribute('data-view');
-                    
-                    // Update active nav item
-                    navItems.forEach(navItem => navItem.classList.remove('active'));
-                    item.classList.add('active');
-                    
-                    // Show selected view, hide others
-                    Object.keys(views).forEach(key => {
-                        views[key].style.display = key === view ? 'block' : 'none';
-                    });
-                });
-            });
-            
-            // Chat functionality
-            function addMessage(content, isUser = false) {
-                const messageDiv = document.createElement('div');
-                messageDiv.className = `message ${isUser ? 'user-message' : 'assistant-message'}`;
-                
-                const messagePara = document.createElement('p');
-                messagePara.textContent = content;
-                
-                const timestamp = document.createElement('div');
-                timestamp.className = 'timestamp';
-                timestamp.textContent = 'Just now';
-                
-                messageDiv.appendChild(messagePara);
-                messageDiv.appendChild(timestamp);
-                
-                const container = document.createElement('div');
-                container.className = 'chat-messages-container';
-                container.appendChild(messageDiv);
-                
-                messagesContainer.appendChild(container);
-                
-                // Scroll to bottom
-                messagesContainer.scrollTop = messagesContainer.scrollHeight;
-            }
-            
-            function sendMessage() {
-                const message = messageInput.value.trim();
-                if (!message) return;
-                
-                // Add user message to UI
-                addMessage(message, true);
-                
-                // Clear input
-                messageInput.value = '';
-                
-                // Send to backend
-                fetch('/api/chat', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ message })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    // Add assistant response to UI
-                    addMessage(data.response);
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    addMessage('Sorry, there was an error processing your request.');
-                });
-            }
-            
-            // Event listeners
-            sendButton.addEventListener('click', sendMessage);
-            
-            messageInput.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') {
-                    sendMessage();
-                }
-            });
-            
-            // Settings event listeners
-            document.getElementById('theme-select').addEventListener('change', function() {
-                // Implementation would send theme change to backend
-                console.log('Theme changed to:', this.value);
-            });
-            
-            document.getElementById('font-size').addEventListener('input', function() {
-                document.getElementById('font-size-value').textContent = this.value + 'px';
-                // Implementation would send font size change to backend
-                console.log('Font size changed to:', this.value);
-            });
-            
-            document.getElementById('animations-toggle').addEventListener('change', function() {
-                // Implementation would send animations toggle to backend
-                console.log('Animations toggled:', this.checked);
-            });
-            
-            document.getElementById('compact-mode-toggle').addEventListener('change', function() {
-                // Implementation would send compact mode toggle to backend
-                console.log('Compact mode toggled:', this.checked);
-            });
-            
-            document.getElementById('api-provider').addEventListener('change', function() {
-                // Implementation would send API provider change to backend
-                console.log('API provider changed to:', this.value);
-            });
-            
-            document.getElementById('api-key').addEventListener('blur', function() {
-                if (this.value) {
-                    // Implementation would send API key to backend
-                    console.log('API key updated');
-                }
-            });
-            
-            // Show a notification function
-            function showNotification(message, level = 'info') {
-                const notification = document.createElement('div');
-                notification.className = `notification ${level}`;
-                notification.textContent = message;
-                document.body.appendChild(notification);
-                
-                // Remove after 3 seconds
-                setTimeout(() => {
-                    notification.remove();
-                }, 3000);
-            }
-            
-            // Example notification
-            // showNotification('Welcome to miniManus!');
-        });
-    </script>
-</body>
-</html>
-"""
-        with open(os.path.join(static_dir, 'index.html'), 'w') as f:
-            f.write(index_html)
-        
-        self.logger.info(f"Created default static files in {static_dir}")
+        self.animations_enabled = enabled
+        self.logger.debug(f"Set animations enabled to {enabled}")
     
     def startup(self) -> None:
         """Start the UI manager."""
         # Start web server
         try:
-            # Enable address reuse to prevent "Address already in use" errors
-            socketserver.TCPServer.allow_reuse_address = True
+            # Create custom handler with access to UIManager
+            ui_manager = self
             
             class CustomHandler(http.server.SimpleHTTPRequestHandler):
                 """Custom HTTP request handler."""
                 
                 def __init__(self, *args, **kwargs):
-                    # Store reference to UI manager
-                    self.ui_manager = UIManager.get_instance()
-                    super().__init__(*args, directory=None, **kwargs)
+                    super().__init__(*args, directory=os.path.join(os.path.dirname(__file__), "../static"), **kwargs)
                 
                 def log_message(self, format, *args):
                     """Override to use our logger."""
-                    self.ui_manager.logger.debug(format % args)
-                
-                def translate_path(self, path):
-                    """Override to serve files from our static directory."""
-                    return self.ui_manager._get_static_file_path(path)
+                    ui_manager.logger.debug(format % args)
                 
                 def do_GET(self):
                     """Handle GET requests."""
-                    # Serve API endpoints
-                    if self.path.startswith('/api/'):
-                        if self.path == '/api/state':
+                    if self.path == "/":
+                        # Serve index.html
+                        self.path = "/index.html"
+                    elif self.path == "/api/settings":
+                        # Handle GET request for settings
+                        try:
+                            # Get settings from config manager
+                            settings = {
+                                "defaultProvider": ui_manager.config_manager.get_config("api.default_provider", "openrouter"),
+                                "theme": ui_manager.config_manager.get_config("ui.theme", "system"),
+                                "fontSize": ui_manager.config_manager.get_config("ui.font_size", 14),
+                                "animations": ui_manager.config_manager.get_config("ui.animations_enabled", True),
+                                "providers": {
+                                    "openrouter": {
+                                        "apiKey": ui_manager.config_manager.get_config("api.openrouter.api_key", ""),
+                                        "model": ui_manager.config_manager.get_config("api.openrouter.default_model", "openai/gpt-4-turbo")
+                                    },
+                                    "anthropic": {
+                                        "apiKey": ui_manager.config_manager.get_config("api.anthropic.api_key", ""),
+                                        "model": ui_manager.config_manager.get_config("api.anthropic.default_model", "claude-3-opus-20240229")
+                                    },
+                                    "deepseek": {
+                                        "apiKey": ui_manager.config_manager.get_config("api.deepseek.api_key", ""),
+                                        "model": ui_manager.config_manager.get_config("api.deepseek.default_model", "deepseek-chat")
+                                    },
+                                    "ollama": {
+                                        "host": ui_manager.config_manager.get_config("api.ollama.host", "http://localhost:11434"),
+                                        "model": ui_manager.config_manager.get_config("api.ollama.default_model", "llama3")
+                                    },
+                                    "litellm": {
+                                        "host": ui_manager.config_manager.get_config("api.litellm.host", "http://localhost:8000"),
+                                        "model": ui_manager.config_manager.get_config("api.litellm.default_model", "gpt-3.5-turbo")
+                                    }
+                                }
+                            }
+                            
+                            # Send response
                             self.send_response(200)
                             self.send_header('Content-type', 'application/json')
                             self.end_headers()
-                            self.wfile.write(json.dumps(self.ui_manager.state).encode('utf-8'))
+                            self.wfile.write(json.dumps(settings).encode('utf-8'))
                             return
-                        elif self.path == '/api/models':
-                            self.send_response(200)
+                        except Exception as e:
+                            ui_manager.logger.error(f"Error handling GET /api/settings: {str(e)}")
+                            self.send_response(500)
                             self.send_header('Content-type', 'application/json')
                             self.end_headers()
-                            
-                            # Get model selection interface
-                            from minimanus.ui.model_selection import ModelSelectionInterface
-                            model_interface = ModelSelectionInterface.get_instance()
-                            
-                            # Get all models
-                            models = model_interface.get_all_models()
-                            
-                            # Convert to serializable format
-                            model_data = [model.to_dict() for model in models]
-                            
-                            self.wfile.write(json.dumps({"models": model_data}).encode('utf-8'))
+                            self.wfile.write(json.dumps({
+                                'status': 'error',
+                                'message': str(e)
+                            }).encode('utf-8'))
                             return
                     
-                    # Serve static files
                     try:
-                        # If requesting a directory (like /), serve index.html
-                        if self.path == '/' or self.path == '':
-                            self.path = '/index.html'
-                        
-                        # Try to serve the file
-                        f = open(self.translate_path(self.path), 'rb')
+                        super().do_GET()
                     except FileNotFoundError:
-                        # If file not found, serve index.
+                        # If file not found in static directory, serve index.html
+                        self.send_response(200)
+                        self.send_header("Content-type", "text/html")
+                        self.end_headers()
+                        
+                        # Read index.html
+                        index_path = os.path.join(os.path.dirname(__file__), "../static/index.html")
+                        if os.path.exists(index_path):
+                            with open(index_path, "rb") as f:
+                                self.wfile.write(f.read())
+                        else:
+                            # Fallback to minimal HTML
+                            html = """
+                            <!DOCTYPE html>
+                            <html>
+                            <head>
+                                <meta charset="UTF-8">
+                                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                                <title>miniManus</title>
+                                <style>
+                                    body {
+                                        font-family: Arial, sans-serif;
+                                        margin: 0;
+                                        padding: 0;
+                                        display: flex;
+                                        flex-direction: column;
+                                        min-height: 100vh;
+                                    }
+                                    header {
+                                        background-color: #4a90e2;
+                                        color: white;
+                                        padding: 1rem;
+                                        text-align: center;
+                                    }
+                                    main {
+                                        flex: 1;
+                                        padding: 1rem;
+                                        max-width: 800px;
+                                        margin: 0 auto;
+                                        width: 100%;
+                                    }
+                                    .chat-container {
+                                        display: flex;
+                                        flex-direction: column;
+                                        height: 70vh;
+                                        border: 1px solid #ddd;
+                                        border-radius: 8px;
+                                        overflow: hidden;
+                                    }
+                                    .chat-messages {
+                                        flex: 1;
+                                        overflow-y: auto;
+                                        padding: 1rem;
+                                        background-color: #f9f9f9;
+                                    }
+                                    .message {
+                                        margin-bottom: 1rem;
+                                        padding: 0.5rem 1rem;
+                                        border-radius: 18px;
+                                        max-width: 80%;
+                                    }
+                                    .user-message {
+                                        background-color: #4a90e2;
+                                        color: white;
+                                        align-self: flex-end;
+                                        margin-left: auto;
+                                    }
+                                    .assistant-message {
+                                        background-color: #e5e5ea;
+                                        color: black;
+                                        align-self: flex-start;
+                                    }
+                                    .chat-input {
+                                        display: flex;
+                                        padding: 0.5rem;
+                                        border-top: 1px solid #ddd;
+                                    }
+                                    .chat-input input {
+                                        flex: 1;
+                                        padding: 0.5rem;
+                                        border: 1px solid #ddd;
+                                        border-radius: 18px;
+                                        margin-right: 0.5rem;
+                                    }
+                                    .chat-input button {
+                                        padding: 0.5rem 1rem;
+                                        background-color: #4a90e2;
+                                        color: white;
+                                        border: none;
+                                        border-radius: 18px;
+                                        cursor: pointer;
+                                    }
+                                </style>
+                            </head>
+                            <body>
+                                <header>
+                                    <h1>miniManus</h1>
+                                </header>
+                                <main>
+                                    <div class="chat-container">
+                                        <div class="chat-messages" id="chat-messages">
+                                            <div class="message assistant-message">
+                                                <div class="message-content">Hello! I'm miniManus. How can I help you today?</div>
+                                            </div>
+                                        </div>
+                                        <div class="chat-input">
+                                            <input type="text" id="message-input" placeholder="Type your message here...">
+                                            <button id="send-button">Send</button>
+                                        </div>
+                                    </div>
+                                </main>
+                                <script>
+                                    document.addEventListener('DOMContentLoaded', () => {
+                                        const messageInput = document.getElementById('message-input');
+                                        const sendButton = document.getElementById('send-button');
+                                        const chatMessages = document.getElementById('chat-messages');
+                                        
+                                        function sendMessage() {
+                                            const message = messageInput.value.trim();
+                                            if (!message) return;
+                                            
+                                            // Add user message to UI
+                                            const userMessageDiv = document.createElement('div');
+                                            userMessageDiv.className = 'message user-message';
+                                            userMessageDiv.innerHTML = `<div class="message-content">${message}</div>`;
+                                            chatMessages.appendChild(userMessageDiv);
+                                            
+                                            // Clear input
+                                            messageInput.value = '';
+                                            
+                                            // Scroll to bottom
+                                            chatMessages.scrollTop = chatMessages.scrollHeight;
+                                            
+                                            // Send to backend API
+                                            fetch('/api/chat', {
+                                                method: 'POST',
+                                                headers: {
+                                                    'Content-Type': 'application/json'
+                                                },
+                                                body: JSON.stringify({ message: message })
+                                            })
+                                            .then(response => response.json())
+                                            .then(data => {
+                                                // Add assistant response
+                                                const assistantMessageDiv = document.createElement('div');
+                                                assistantMessageDiv.className = 'message assistant-message';
+                                                assistantMessageDiv.innerHTML = `<div class="message-content">${data.response}</div>`;
+                                                chatMessages.appendChild(assistantMessageDiv);
+                                                
+                                                // Scroll to bottom
+                                                chatMessages.scrollTop = chatMessages.scrollHeight;
+                                            })
+                                            .catch(error => {
+                                                console.error('Error:', error);
+                                                // Add error message
+                                                const errorMessageDiv = document.createElement('div');
+                                                errorMessageDiv.className = 'message assistant-message';
+                                                errorMessageDiv.innerHTML = `<div class="message-content">Sorry, there was an error processing your request.</div>`;
+                                                chatMessages.appendChild(errorMessageDiv);
+                                                
+                                                // Scroll to bottom
+                                                chatMessages.scrollTop = chatMessages.scrollHeight;
+                                            });
+                                        }
+                                        
+                                        // Event listeners
+                                        sendButton.addEventListener('click', sendMessage);
+                                        
+                                        messageInput.addEventListener('keypress', (e) => {
+                                            if (e.key === 'Enter') {
+                                                sendMessage();
+                                            }
+                                        });
+                                    });
+                                </script>
+                            </body>
+                            </html>
+                            """
+                            self.wfile.write(html.encode())
+                
+                def do_POST(self):
+                    """Handle POST requests."""
+                    try:
+                        if self.path == "/api/chat":
+                            # Get request body
+                            content_length = int(self.headers['Content-Length'])
+                            post_data = self.rfile.read(content_length)
+                            request_data = json.loads(post_data.decode('utf-8'))
+                            
+                            message = request_data.get('message', '')
+                            
+                            # Get the chat interface
+                            from ..ui.chat_interface import ChatInterface, MessageRole, ChatMessage
+                            chat_interface = ChatInterface.get_instance()
+                            
+                            # Create a new session if none exists
+                            if not chat_interface.current_session_id:
+                                session = chat_interface.create_session(title="New Chat")
+                            else:
+                                session = chat_interface.get_session(chat_interface.current_session_id)
+                            
+                            # Add user message to session
+                            user_message = ChatMessage(MessageRole.USER, message)
+                            session.add_message(user_message)
+                            
+                            # Get API manager
+                            api_manager = APIManager.get_instance()
+                            
+                            # Get settings from config
+                            default_provider_name = ui_manager.config_manager.get_config("api.default_provider", "openrouter")
+                            try:
+                                default_provider = APIProvider[default_provider_name.upper()]
+                            except (KeyError, ValueError):
+                                default_provider = APIProvider.OPENROUTER
+                            
+                            # Check if the provider is available
+                            if api_manager.check_provider_availability(default_provider):
+                                # Get provider-specific settings
+                                provider_key = default_provider_name.lower()
+                                api_key = ui_manager.config_manager.get_config(f"api.{provider_key}.api_key", "")
+                                model = ui_manager.config_manager.get_config(f"api.{provider_key}.default_model", "")
+                                temperature = ui_manager.config_manager.get_config("api.temperature", 0.7)
+                                max_tokens = ui_manager.config_manager.get_config("api.max_tokens", 1024)
+                                
+                                # Prepare messages for API
+                                messages = []
+                                
+                                # Add system message if available
+                                if session.system_prompt:
+                                    messages.append({
+                                        "role": "system",
+                                        "content": session.system_prompt
+                                    })
+                                
+                                # Add conversation history (limited to last 10 messages)
+                                for msg in session.messages[-10:]:
+                                    messages.append({
+                                        "role": msg.role.name.lower(),
+                                        "content": msg.content
+                                    })
+                                
+                                try:
+                                    # Get the appropriate adapter
+                                    adapter = api_manager.get_adapter(default_provider)
+                                    
+                                    if adapter:
+                                        # Call the API
+                                        response_text = adapter.generate_text(
+                                            messages=messages,
+                                            model=model,
+                                            temperature=temperature,
+                                            max_tokens=max_tokens,
+                                            api_key=api_key
+                                        )
+                                    else:
+                                        # Fallback if no adapter
+                                        response_text = "I'm sorry, but I couldn't connect to the language model. Please check your API settings."
+                                except Exception as e:
+                                    # Handle API errors
+                                    ui_manager.logger.error(f"API error: {str(e)}")
+                                    response_text = f"I'm sorry, but there was an error communicating with the language model: {str(e)}"
+                            else:
+                                # Provider not available
+                                response_text = f"I'm sorry, but the {default_provider_name} API is not available. Please check your API settings and ensure you've entered a valid API key."
+                            
+                            # Add assistant message to session
+                            assistant_message = ChatMessage(MessageRole.ASSISTANT, response_text)
+                            session.add_message(assistant_message)
+                            
+                            # Prepare response
+                            response = {
+                                'status': 'success',
+                                'response': response_text
+                            }
+                            
+                            # Send response
+                            self.send_response(200)
+                            self.send_header('Content-type', 'application/json')
+                            self.end_headers()
+                            self.wfile.write(json.dumps(response).encode('utf-8'))
+                            
+                            # Log the interaction
+                            ui_manager.logger.info(f"Chat message processed: {message}")
+                            
+                        elif self.path == "/api/settings":
+                            # Handle POST request for settings
+                            content_length = int(self.headers['Content-Length'])
+                            post_data = self.rfile.read(content_length)
+                            settings_data = json.loads(post_data.decode('utf-8'))
+                            
+                            # Update config with new settings
+                            ui_manager.config_manager.set_config("api.default_provider", settings_data.get("defaultProvider", "openrouter"))
+                            ui_manager.config_manager.set_config("ui.theme", settings_data.get("theme", "system"))
+                            ui_manager.config_manager.set_config("ui.font_size", settings_data.get("fontSize", 14))
+                            ui_manager.config_manager.set_config("ui.animations_enabled", settings_data.get("animations", True))
+                            
+                            # Update provider-specific settings
+                            providers = settings_data.get("providers", {})
+                            
+                            if "openrouter" in providers:
+                                ui_manager.config_manager.set_config("api.openrouter.api_key", providers["openrouter"].get("apiKey", ""))
+                                ui_manager.config_manager.set_config("api.openrouter.default_model", providers["openrouter"].get("model", "openai/gpt-4-turbo"))
+                            
+                            if "anthropic" in providers:
+                                ui_manager.config_manager.set_config("api.anthropic.api_key", providers["anthropic"].get("apiKey", ""))
+                                ui_manager.config_manager.set_config("api.anthropic.default_model", providers["anthropic"].get("model", "claude-3-opus-20240229"))
+                            
+                            if "deepseek" in providers:
+                                ui_manager.config_manager.set_config("api.deepseek.api_key", providers["deepseek"].get("apiKey", ""))
+                                ui_manager.config_manager.set_config("api.deepseek.default_model", providers["deepseek"].get("model", "deepseek-chat"))
+                            
+                            if "ollama" in providers:
+                                ui_manager.config_manager.set_config("api.ollama.host", providers["ollama"].get("host", "http://localhost:11434"))
+                                ui_manager.config_manager.set_config("api.ollama.default_model", providers["ollama"].get("model", "llama3"))
+                            
+                            if "litellm" in providers:
+                                ui_manager.config_manager.set_config("api.litellm.host", providers["litellm"].get("host", "http://localhost:8000"))
+                                ui_manager.config_manager.set_config("api.litellm.default_model", providers["litellm"].get("model", "gpt-3.5-turbo"))
+                            
+                            # Save config
+                            ui_manager.config_manager.save_config()
+                            
+                            # Send response
+                            self.send_response(200)
+                            self.send_header('Content-type', 'application/json')
+                            self.end_headers()
+                            self.wfile.write(json.dumps({
+                                'status': 'success',
+                                'message': 'Settings saved successfully'
+                            }).encode('utf-8'))
+                            
+                            ui_manager.logger.info("Settings updated")
+                            
+                        elif self.path == "/api/model":
+                            # Handle POST request for model selection
+                            content_length = int(self.headers['Content-Length'])
+                            post_data = self.rfile.read(content_length)
+                            model_data = json.loads(post_data.decode('utf-8'))
+                            
+                            model = model_data.get('model', '')
+                            
+                            # Determine provider from model
+                            provider = "openrouter"  # Default
+                            
+                            if model.startswith("anthropic/") or "claude" in model:
+                                provider = "anthropic"
+                            elif "llama" in model or "mistral" in model and not model.startswith("mistralai/"):
+                                provider = "ollama"
+                            elif "deepseek" in model:
+                                provider = "deepseek"
+                            
+                            # Update config
+                            ui_manager.config_manager.set_config("api.default_provider", provider)
+                            ui_manager.config_manager.set_config(f"api.{provider}.default_model", model)
+                            
+                            # Save config
+                            ui_manager.config_manager.save_config()
+                            
+                            # Send response
+                            self.send_response(200)
+                            self.send_header('Content-type', 'application/json')
+                            self.end_headers()
+                            self.wfile.write(json.dumps({
+                                'status': 'success',
+                                'message': 'Model selection saved successfully'
+                            }).encode('utf-8'))
+                            
+                            ui_manager.logger.info(f"Model selection updated: {model}")
+                            
+                        else:
+                            # Handle other POST requests
+                            self.send_response(404)
+                            self.end_headers()
+                            self.wfile.write(b'Not Found')
+                    
+                    except Exception as e:
+                        # Log the error
+                        ui_manager.logger.error(f"Error handling POST request: {str(e)}")
+                        
+                        # Send error response
+                        self.send_response(500)
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({
+                            'status': 'error',
+                            'message': str(e)
+                        }).encode('utf-8'))
+            
+            # Enable address reuse to prevent "Address already in use" errors
+            socketserver.TCPServer.allow_reuse_address = True
+            
+            # Create and start server
+            self.server = socketserver.TCPServer((self.host, self.port), CustomHandler)
+            self.server_thread = threading.Thread(target=self.server.serve_forever)
+            self.server_thread.daemon = True
+            self.server_thread.start()
+            
+            self.logger.info(f"Web server started at http://{self.host}:{self.port}")
+            print(f"\n\n*** miniManus UI is now available at http://{self.host}:{self.port} ***\n")
+            
+        except Exception as e:
+            self.logger.error(f"Error starting web server: {str(e)}")
+            self.error_handler.handle_error(
+                ErrorCategory.SYSTEM,
+                ErrorSeverity.HIGH,
+                f"Failed to start web server: {str(e)}"
+            )
+    
+    def shutdown(self) -> None:
+        """Stop the UI manager."""
+        if self.server:
+            self.server.shutdown()
+            self.server = None
+            self.logger.info("Web server stopped")
+        
+        if self.server_thread and self.server_thread.is_alive():
+            self.server_thread.join(timeout=2.0)
+            self.server_thread = None
+        
+        self.logger.info("UIManager stopped")

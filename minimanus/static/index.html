@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>miniManus</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <h1>miniManus</h1>
+            <nav>
+                <ul>
+                    <li><a href="#" class="active" id="chat-tab">Chat</a></li>
+                    <li><a href="#" id="models-tab">Models</a></li>
+                    <li><a href="#" id="settings-tab">Settings</a></li>
+                </ul>
+            </nav>
+        </header>
+        
+        <main>
+            <!-- Chat Interface -->
+            <section id="chat-section" class="active-section">
+                <div class="chat-container">
+                    <div class="chat-messages" id="chat-messages">
+                        <div class="message assistant-message">
+                            <div class="message-content">Hello! I'm miniManus. How can I help you today?</div>
+                        </div>
+                    </div>
+                    <div class="chat-input">
+                        <textarea id="message-input" placeholder="Type your message here..."></textarea>
+                        <button id="send-button">Send</button>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Model Selection Interface -->
+            <section id="models-section" class="section">
+                <h2>Model Selection</h2>
+                <div class="models-container">
+                    <div class="model-group">
+                        <h3>OpenRouter Models</h3>
+                        <div class="model-list" id="openrouter-models">
+                            <div class="model-item">
+                                <input type="radio" name="model" id="openrouter-claude" value="anthropic/claude-3-opus">
+                                <label for="openrouter-claude">Claude 3 Opus</label>
+                            </div>
+                            <div class="model-item">
+                                <input type="radio" name="model" id="openrouter-gpt4" value="openai/gpt-4-turbo" checked>
+                                <label for="openrouter-gpt4">GPT-4 Turbo</label>
+                            </div>
+                            <div class="model-item">
+                                <input type="radio" name="model" id="openrouter-mistral" value="mistralai/mistral-large">
+                                <label for="openrouter-mistral">Mistral Large</label>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="model-group">
+                        <h3>Local Models (Ollama)</h3>
+                        <div class="model-list" id="ollama-models">
+                            <div class="model-item">
+                                <input type="radio" name="model" id="ollama-llama" value="llama3">
+                                <label for="ollama-llama">Llama 3</label>
+                            </div>
+                            <div class="model-item">
+                                <input type="radio" name="model" id="ollama-mistral" value="mistral">
+                                <label for="ollama-mistral">Mistral</label>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <button id="save-model">Save Selection</button>
+                </div>
+            </section>
+            
+            <!-- Settings Panel -->
+            <section id="settings-section" class="section">
+                <h2>Settings</h2>
+                <div class="settings-container">
+                    <div class="settings-group">
+                        <h3>API Settings</h3>
+                        <div class="setting-item">
+                            <label for="default-provider">Default Provider:</label>
+                            <select id="default-provider">
+                                <option value="openrouter">OpenRouter</option>
+                                <option value="anthropic">Anthropic</option>
+                                <option value="deepseek">DeepSeek</option>
+                                <option value="ollama">Ollama</option>
+                                <option value="litellm">LiteLLM</option>
+                            </select>
+                        </div>
+                        
+                        <div class="provider-settings" id="openrouter-settings">
+                            <div class="setting-item">
+                                <label for="openrouter-api-key">OpenRouter API Key:</label>
+                                <input type="password" id="openrouter-api-key">
+                            </div>
+                            <div class="setting-item">
+                                <label for="openrouter-model">Default Model:</label>
+                                <input type="text" id="openrouter-model" value="openai/gpt-4-turbo">
+                            </div>
+                        </div>
+                        
+                        <div class="provider-settings" id="anthropic-settings" style="display: none;">
+                            <div class="setting-item">
+                                <label for="anthropic-api-key">Anthropic API Key:</label>
+                                <input type="password" id="anthropic-api-key">
+                            </div>
+                            <div class="setting-item">
+                                <label for="anthropic-model">Default Model:</label>
+                                <input type="text" id="anthropic-model" value="claude-3-opus-20240229">
+                            </div>
+                        </div>
+                        
+                        <div class="provider-settings" id="deepseek-settings" style="display: none;">
+                            <div class="setting-item">
+                                <label for="deepseek-api-key">DeepSeek API Key:</label>
+                                <input type="password" id="deepseek-api-key">
+                            </div>
+                            <div class="setting-item">
+                                <label for="deepseek-model">Default Model:</label>
+                                <input type="text" id="deepseek-model" value="deepseek-chat">
+                            </div>
+                        </div>
+                        
+                        <div class="provider-settings" id="ollama-settings" style="display: none;">
+                            <div class="setting-item">
+                                <label for="ollama-host">Ollama Host:</label>
+                                <input type="text" id="ollama-host" value="http://localhost:11434">
+                            </div>
+                            <div class="setting-item">
+                                <label for="ollama-model">Default Model:</label>
+                                <input type="text" id="ollama-model" value="llama3">
+                            </div>
+                        </div>
+                        
+                        <div class="provider-settings" id="litellm-settings" style="display: none;">
+                            <div class="setting-item">
+                                <label for="litellm-host">LiteLLM Host:</label>
+                                <input type="text" id="litellm-host" value="http://localhost:8000">
+                            </div>
+                            <div class="setting-item">
+                                <label for="litellm-model">Default Model:</label>
+                                <input type="text" id="litellm-model" value="gpt-3.5-turbo">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="settings-group">
+                        <h3>UI Settings</h3>
+                        <div class="setting-item">
+                            <label for="theme">Theme:</label>
+                            <select id="theme">
+                                <option value="system">System Default</option>
+                                <option value="light">Light</option>
+                                <option value="dark">Dark</option>
+                            </select>
+                        </div>
+                        <div class="setting-item">
+                            <label for="font-size">Font Size:</label>
+                            <input type="range" id="font-size" min="12" max="20" value="14">
+                            <span id="font-size-value">14px</span>
+                        </div>
+                        <div class="setting-item">
+                            <label for="animations">Animations:</label>
+                            <input type="checkbox" id="animations" checked>
+                        </div>
+                    </div>
+                    
+                    <button id="save-settings">Save Settings</button>
+                </div>
+            </section>
+        </main>
+        
+        <footer>
+            <p>miniManus v0.1.0 | Running on Termux</p>
+        </footer>
+    </div>
+    
+    <script src="script.js"></script>
+</body>
+</html>

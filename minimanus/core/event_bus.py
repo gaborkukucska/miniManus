@@ -14,6 +14,7 @@ import threading
 import queue
 import time
 from typing import Dict, List, Callable, Any, Optional, Set, Tuple
+
 from enum import Enum, auto
 
 logger = logging.getLogger("miniManus.EventBus")
@@ -47,6 +48,21 @@ class Event:
     def __str__(self) -> str:
         """String representation of the event."""
         return f"Event(type={self.event_type}, priority={self.priority.name}, data={self.data})"
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """
+        Get a value from the event data.
+        
+        Args:
+            key: Key to get from data
+            default: Default value to return if key not found
+            
+        Returns:
+            Value for the key if found, otherwise default
+        """
+        if isinstance(self.data, dict):
+            return self.data.get(key, default)
+        return default
 
 class EventBus:
     """
