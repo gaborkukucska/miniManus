@@ -182,7 +182,8 @@ class UIManager:
             def _handle_get_settings(self):
                 """Handle GET /api/settings."""
                 # Get the settings from the config manager
-                settings = ui_manager.config_manager.get_all_config()
+                # Fixed: Use get_config() instead of get_all_config()
+                settings = ui_manager.config_manager.get_config()
                 
                 # Send the response
                 self.send_response(200)
@@ -208,7 +209,17 @@ class UIManager:
             def _handle_post_settings(self, body):
                 """Handle POST /api/settings."""
                 # Update the settings in the config manager
-                ui_manager.config_manager.update_config(body)
+                # Fixed: Use set_config() for each setting instead of update_config()
+                if isinstance(body, dict):
+                    for key, value in body.items():
+                        if isinstance(value, dict) and key == "providers":
+                            # Handle nested provider settings
+                            for provider, provider_settings in value.items():
+                                for setting_key, setting_value in provider_settings.items():
+                                    config_path = f"api.providers.{provider}.{setting_key}"
+                                    ui_manager.config_manager.set_config(config_path, setting_value)
+                        else:
+                            ui_manager.config_manager.set_config(key, value)
                 
                 # Save the settings
                 ui_manager.config_manager.save_config()
@@ -250,21 +261,11 @@ class UIManager:
                 
                 # Update the model in the config manager
                 if provider:
-                    ui_manager.config_manager.update_config({
-                        "providers": {
-                            provider: {
-                                "model": model
-                            }
-                        }
-                    })
-                    
-                    # Save the settings
-                    ui_manager.config_manager.save_config()
-                    
-                    # Publish an event
-                    ui_manager.event_bus.publish(
-                        Event("model.updated", {"provider": provider, "model": model})
-                    )
+                    # Fixed: Use set_config() instead of update_config()
+                    ui_manager.config_manager.set_config(f"api.providers.{provider}.default_model", model)
+                
+                # Save the settings
+                ui_manager.config_manager.save_config()
                 
                 # Send the response
                 self.send_response(200)
@@ -276,7 +277,7 @@ class UIManager:
             
             def _serve_static_file(self, path):
                 """Serve a static file."""
-                # Map the URL path to a file path
+                # Map URL path to file path
                 if path == "/" or path == "":
                     file_path = os.path.join(ui_manager.static_dir, "index.html")
                 else:
@@ -284,7 +285,7 @@ class UIManager:
                     path = path[1:] if path.startswith("/") else path
                     file_path = os.path.join(ui_manager.static_dir, path)
                 
-                # Check if the file exists
+                # Check if file exists
                 if not os.path.isfile(file_path):
                     # Try index.html for directories
                     if os.path.isdir(file_path):
@@ -296,7 +297,7 @@ class UIManager:
                         self.send_error(404, "File not found")
                         return
                 
-                # Determine the content type
+                # Determine content type
                 content_type = self._get_content_type(file_path)
                 
                 # Send the file
@@ -336,7 +337,7 @@ class UIManager:
                 # Get the file extension
                 _, ext = os.path.splitext(file_path)
                 
-                # Return the content type
+                # Return the content type or default to binary
                 return content_types.get(ext.lower(), "application/octet-stream")
         
         # Create and start the server
@@ -350,65 +351,59 @@ class UIManager:
         self.logger.info(f"Web server started at http://{self.host}:{self.port}")
     
     def _on_settings_updated(self, event):
-        """Handle settings.updated event."""
+        """Handle settings updated event."""
         # Nothing to do here for now
         pass
     
     def _process_chat_message(self, message):
         """Process a chat message."""
+        # Get the default provider
+        provider_name = self.config_manager.get_config("defaultProvider", "openrouter")
+        
+        # Map provider name to APIProvider enum
+        provider_map = {
+            "openrouter": APIProvider.OPENROUTER,
+            "anthropic": APIProvider.ANTHROPIC,
+            "deepseek": APIProvider.DEEPSEEK,
+            "ollama": APIProvider.OLLAMA,
+            "litellm": APIProvider.LITELLM,
+        }
+        
+        provider = provider_map.get(provider_name)
+        if not provider:
+            return "Sorry, the selected API provider is not available. Please check your settings."
+        
+        # Get the adapter for the provider
+        adapter = self.api_manager.get_adapter(provider)
+        if not adapter:
+            return "Sorry, the selected API provider is not available. Please check your settings."
+        
+        # Get the model for the provider
+        model = self.config_manager.get_config(f"api.providers.{provider_name}.default_model")
+        
+        # Check if the provider is available
+        if not self.api_manager.check_provider_availability(provider):
+            return "Sorry, the selected API provider is not available. Please check your settings."
+        
+        # Process the message
         try:
-            # Get the default provider from config
-            provider_name = self.config_manager.get_config("defaultProvider", "openrouter")
-            
-            # Map provider name to APIProvider enum
-            provider_map = {
-                "openrouter": APIProvider.OPENROUTER,
-                "anthropic": APIProvider.ANTHROPIC,
-                "deepseek": APIProvider.DEEPSEEK,
-                "ollama": APIProvider.OLLAMA,
-                "litellm": APIProvider.LITELLM,
-            }
-            
-            provider = provider_map.get(provider_name, APIProvider.OPENROUTER)
-            
-            # Get the adapter for the provider
-            adapter = self.api_manager.get_adapter(provider)
-            
-            if not adapter:
-                return "I'm sorry, but the selected API provider is not available. Please check your settings."
-            
-            # Get the model from config
-            model = None
-            if provider_name == "openrouter":
-                model = self.config_manager.get_config("providers.openrouter.model")
-            elif provider_name == "anthropic":
-                model = self.config_manager.get_config("providers.anthropic.model")
-            elif provider_name == "deepseek":
-                model = self.config_manager.get_config("providers.deepseek.model")
-            elif provider_name == "ollama":
-                model = self.config_manager.get_config("providers.ollama.model")
-            elif provider_name == "litellm":
-                model = self.config_manager.get_config("providers.litellm.model")
-            
-            # Format the message for the provider
+            # Create a simple message format
             messages = [
-                {"role": "system", "content": "You are miniManus, a helpful AI assistant running on a mobile device."},
                 {"role": "user", "content": message}
             ]
             
-            # Generate a response
-            if hasattr(adapter, 'generate_text'):
-                response = adapter.generate_text(messages, model=model)
-                return response
-            else:
-                return "I'm sorry, but the selected API provider does not support text generation."
+            # Call the adapter
+            response = adapter.generate_text(messages, model=model)
+            
+            return response
         
         except Exception as e:
             self.error_handler.handle_error(
                 e, ErrorCategory.API, ErrorSeverity.ERROR,
-                {"message": message}
+                {"provider": provider_name, "action": "generate_text"}
             )
-            return f"I'm sorry, but there was an error processing your request: {str(e)}"
+            
+            return f"Sorry, there was an error processing your request: {str(e)}"
     
     def _get_models_for_provider(self, provider_name):
         """Get available models for a provider."""
@@ -424,71 +419,85 @@ class UIManager:
             
             provider = provider_map.get(provider_name)
             if not provider:
+                self.logger.warning(f"Unknown provider: {provider_name}")
                 return []
             
             # Get the adapter for the provider
             adapter = self.api_manager.get_adapter(provider)
             if not adapter:
+                self.logger.warning(f"No adapter found for provider: {provider_name}")
                 return []
+            
+            # Check if the provider is available
+            if not self.api_manager.check_provider_availability(provider):
+                self.logger.warning(f"Provider not available: {provider_name}")
+                # Return hardcoded models as fallback
+                return self._get_fallback_models(provider_name)
             
             # Get available models
             if hasattr(adapter, 'get_available_models'):
-                # Run the async method in a new event loop
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
                 try:
-                    models = loop.run_until_complete(adapter.get_available_models())
-                finally:
-                    loop.close()
-                return models
+                    # Run the async method in a new event loop
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        models = loop.run_until_complete(adapter.get_available_models())
+                        if models:
+                            self.logger.info(f"Successfully fetched {len(models)} models from {provider_name}")
+                            return models
+                        else:
+                            self.logger.warning(f"No models returned from {provider_name}, using fallback")
+                            return self._get_fallback_models(provider_name)
+                    except Exception as e:
+                        self.logger.error(f"Error fetching models from {provider_name}: {str(e)}")
+                        return self._get_fallback_models(provider_name)
+                    finally:
+                        loop.close()
+                except Exception as e:
+                    self.logger.error(f"Error setting up async loop for {provider_name}: {str(e)}")
+                    return self._get_fallback_models(provider_name)
             else:
-                # Return default models for providers without a get_available_models method
-                if provider_name == "openrouter":
-                    return [
-                        {"id": "anthropic/claude-3-opus", "name": "Claude 3 Opus"},
-                        {"id": "openai/gpt-4-turbo", "name": "GPT-4 Turbo"},
-                        {"id": "mistralai/mistral-large", "name": "Mistral Large"}
-                    ]
-                elif provider_name == "anthropic":
-                    return [
-                        {"id": "claude-3-opus-20240229", "name": "Claude 3 Opus"},
-                        {"id": "claude-3-sonnet-20240229", "name": "Claude 3 Sonnet"},
-                        {"id": "claude-3-haiku-20240307", "name": "Claude 3 Haiku"}
-                    ]
-                elif provider_name == "deepseek":
-                    return [
-                        {"id": "deepseek-chat", "name": "DeepSeek Chat"},
-                        {"id": "deepseek-coder", "name": "DeepSeek Coder"}
-                    ]
-                elif provider_name == "ollama":
-                    return [
-                        {"id": "llama3", "name": "Llama 3"},
-                        {"id": "mistral", "name": "Mistral"},
-                        {"id": "llama2", "name": "Llama 2"}
-                    ]
-                elif provider_name == "litellm":
-                    return [
-                        {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo"},
-                        {"id": "gpt-4", "name": "GPT-4"}
-                    ]
-                else:
-                    return []
+                self.logger.warning(f"Adapter for {provider_name} does not have get_available_models method")
+                return self._get_fallback_models(provider_name)
         
         except Exception as e:
             self.error_handler.handle_error(
                 e, ErrorCategory.API, ErrorSeverity.ERROR,
                 {"provider": provider_name}
             )
-            return []
-
-# For standalone testing
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
-    ui_manager = UIManager.get_instance()
-    ui_manager.start()
+            return self._get_fallback_models(provider_name)
     
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        ui_manager.stop()
+    def _get_fallback_models(self, provider_name):
+        """Get fallback models for a provider when API call fails."""
+        self.logger.info(f"Using fallback models for {provider_name}")
+        
+        if provider_name == "openrouter":
+            return [
+                {"id": "anthropic/claude-3-opus", "name": "Claude 3 Opus"},
+                {"id": "openai/gpt-4-turbo", "name": "GPT-4 Turbo"},
+                {"id": "mistralai/mistral-large", "name": "Mistral Large"}
+            ]
+        elif provider_name == "anthropic":
+            return [
+                {"id": "claude-3-opus-20240229", "name": "Claude 3 Opus"},
+                {"id": "claude-3-sonnet-20240229", "name": "Claude 3 Sonnet"},
+                {"id": "claude-3-haiku-20240307", "name": "Claude 3 Haiku"}
+            ]
+        elif provider_name == "deepseek":
+            return [
+                {"id": "deepseek-chat", "name": "DeepSeek Chat"},
+                {"id": "deepseek-coder", "name": "DeepSeek Coder"}
+            ]
+        elif provider_name == "ollama":
+            return [
+                {"id": "llama3", "name": "Llama 3"},
+                {"id": "mistral", "name": "Mistral"},
+                {"id": "llama2", "name": "Llama 2"}
+            ]
+        elif provider_name == "litellm":
+            return [
+                {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo"},
+                {"id": "gpt-4", "name": "GPT-4"}
+            ]
+        else:
+            return []

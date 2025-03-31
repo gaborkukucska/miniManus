@@ -1,33 +1,27 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-UI Manager for miniManus
-
-This module implements the UI Manager component, which coordinates all UI interactions,
-manages UI state, handles user input and output, and provides a responsive mobile interface.
-"""
-
 import os
 import sys
+import json
 import logging
 import asyncio
-import json
-from typing import Dict, List, Optional, Any, Callable, Union
+import threading
+from typing import Dict, List, Any, Optional
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
 from enum import Enum, auto
-from pathlib import Path
 
 # Import local modules
 try:
     from ..core.event_bus import EventBus, Event, EventPriority
     from ..core.error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
     from ..core.config_manager import ConfigurationManager
+    from ..api.api_manager import APIManager, APIProvider
 except ImportError:
     # For standalone testing
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     from core.event_bus import EventBus, Event, EventPriority
     from core.error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
     from core.config_manager import ConfigurationManager
+    from api.api_manager import APIManager, APIProvider
 
 logger = logging.getLogger("miniManus.UIManager")
 
@@ -39,14 +33,12 @@ class UITheme(Enum):
 
 class UIManager:
     """
-    UIManager coordinates all UI interactions for miniManus.
+    UIManager handles the web-based user interface for miniManus.
     
-    It handles:
-    - UI state management
-    - User input and output
-    - Theme and appearance settings
-    - Mobile responsiveness
-    - UI component coordination
+    It provides:
+    - Web server for the UI
+    - API endpoints for the UI to interact with the backend
+    - Static file serving for the UI assets
     """
     
     _instance = None  # Singleton instance
@@ -67,286 +59,445 @@ class UIManager:
         self.event_bus = EventBus.get_instance()
         self.error_handler = ErrorHandler.get_instance()
         self.config_manager = ConfigurationManager.get_instance()
+        self.api_manager = APIManager.get_instance()
         
-        # UI settings
-        self.theme = UITheme[self.config_manager.get_config(
-            "ui.theme", 
-            UITheme.SYSTEM.name
-        )]
+        # Web server configuration
+        self.host = self.config_manager.get_config("ui.host", "localhost")
+        self.port = self.config_manager.get_config("ui.port", 8080)
         
-        self.font_size = self.config_manager.get_config("ui.font_size", 14)
-        self.enable_animations = self.config_manager.get_config("ui.enable_animations", True)
-        self.compact_mode = self.config_manager.get_config("ui.compact_mode", False)
+        # Static file directory
+        self.static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static"))
         
-        # UI components
-        self.components = {}
-        
-        # UI state
-        self.state = {
-            "current_view": "chat",
-            "is_processing": False,
-            "notification_count": 0,
-            "error_count": 0,
-        }
-        
-        # Register event handlers
-        self.event_bus.subscribe("ui.theme_changed", self._handle_theme_changed)
-        self.event_bus.subscribe("ui.font_size_changed", self._handle_font_size_changed)
-        self.event_bus.subscribe("ui.animations_toggled", self._handle_animations_toggled)
-        self.event_bus.subscribe("ui.compact_mode_toggled", self._handle_compact_mode_toggled)
-        self.event_bus.subscribe("ui.view_changed", self._handle_view_changed)
-        self.event_bus.subscribe("ui.notification", self._handle_notification)
-        self.event_bus.subscribe("ui.error", self._handle_error)
+        # Server instance
+        self.server = None
+        self.server_thread = None
         
         self.logger.info("UIManager initialized")
     
-    def register_component(self, name: str, component: Any) -> None:
-        """
-        Register a UI component.
-        
-        Args:
-            name: Name of the component
-            component: Component instance
-        """
-        self.components[name] = component
-        self.logger.debug(f"Registered UI component: {name}")
+    def startup(self):
+        """Start the UI manager (alias for start method for consistency with other components)."""
+        self.start()
     
-    def get_component(self, name: str) -> Optional[Any]:
-        """
-        Get a UI component.
-        
-        Args:
-            name: Name of the component
-            
-        Returns:
-            Component instance or None if not registered
-        """
-        return self.components.get(name)
-    
-    def set_theme(self, theme: UITheme) -> None:
-        """
-        Set the UI theme.
-        
-        Args:
-            theme: Theme to set
-        """
-        if theme != self.theme:
-            self.theme = theme
-            self.config_manager.set_config("ui.theme", theme.name)
-            self.event_bus.publish_event("ui.theme_changed", {"theme": theme.name})
-            self.logger.info(f"Theme changed to {theme.name}")
-    
-    def set_font_size(self, size: int) -> None:
-        """
-        Set the UI font size.
-        
-        Args:
-            size: Font size to set
-        """
-        if size != self.font_size:
-            self.font_size = size
-            self.config_manager.set_config("ui.font_size", size)
-            self.event_bus.publish_event("ui.font_size_changed", {"size": size})
-            self.logger.info(f"Font size changed to {size}")
-    
-    def toggle_animations(self, enable: bool) -> None:
-        """
-        Toggle UI animations.
-        
-        Args:
-            enable: Whether to enable animations
-        """
-        if enable != self.enable_animations:
-            self.enable_animations = enable
-            self.config_manager.set_config("ui.enable_animations", enable)
-            self.event_bus.publish_event("ui.animations_toggled", {"enabled": enable})
-            self.logger.info(f"Animations {'enabled' if enable else 'disabled'}")
-    
-    def toggle_compact_mode(self, enable: bool) -> None:
-        """
-        Toggle UI compact mode.
-        
-        Args:
-            enable: Whether to enable compact mode
-        """
-        if enable != self.compact_mode:
-            self.compact_mode = enable
-            self.config_manager.set_config("ui.compact_mode", enable)
-            self.event_bus.publish_event("ui.compact_mode_toggled", {"enabled": enable})
-            self.logger.info(f"Compact mode {'enabled' if enable else 'disabled'}")
-    
-    def change_view(self, view: str) -> None:
-        """
-        Change the current UI view.
-        
-        Args:
-            view: View to change to
-        """
-        if view != self.state["current_view"]:
-            self.state["current_view"] = view
-            self.event_bus.publish_event("ui.view_changed", {"view": view})
-            self.logger.info(f"View changed to {view}")
-    
-    def show_notification(self, message: str, level: str = "info", duration: int = 3000) -> None:
-        """
-        Show a notification.
-        
-        Args:
-            message: Notification message
-            level: Notification level (info, warning, error)
-            duration: Duration in milliseconds
-        """
-        self.state["notification_count"] += 1
-        self.event_bus.publish_event("ui.notification", {
-            "message": message,
-            "level": level,
-            "duration": duration,
-        })
-        self.logger.debug(f"Notification shown: {message}")
-    
-    def show_error(self, message: str, details: Optional[str] = None) -> None:
-        """
-        Show an error message.
-        
-        Args:
-            message: Error message
-            details: Error details
-        """
-        self.state["error_count"] += 1
-        self.event_bus.publish_event("ui.error", {
-            "message": message,
-            "details": details,
-        })
-        self.logger.debug(f"Error shown: {message}")
-    
-    def set_processing_state(self, is_processing: bool) -> None:
-        """
-        Set the processing state.
-        
-        Args:
-            is_processing: Whether the system is processing
-        """
-        if is_processing != self.state["is_processing"]:
-            self.state["is_processing"] = is_processing
-            self.event_bus.publish_event("ui.processing_state_changed", {"is_processing": is_processing})
-            self.logger.debug(f"Processing state changed to {is_processing}")
-    
-    def _handle_theme_changed(self, event: Dict[str, Any]) -> None:
-        """
-        Handle theme changed event.
-        
-        Args:
-            event: Event data
-        """
-        theme_name = event.get("theme")
-        try:
-            self.theme = UITheme[theme_name]
-            self.logger.debug(f"Theme updated to {theme_name}")
-        except (KeyError, ValueError):
-            self.logger.warning(f"Invalid theme: {theme_name}")
-    
-    def _handle_font_size_changed(self, event: Dict[str, Any]) -> None:
-        """
-        Handle font size changed event.
-        
-        Args:
-            event: Event data
-        """
-        size = event.get("size")
-        if isinstance(size, (int, float)):
-            self.font_size = size
-            self.logger.debug(f"Font size updated to {size}")
-    
-    def _handle_animations_toggled(self, event: Dict[str, Any]) -> None:
-        """
-        Handle animations toggled event.
-        
-        Args:
-            event: Event data
-        """
-        enabled = event.get("enabled")
-        if isinstance(enabled, bool):
-            self.enable_animations = enabled
-            self.logger.debug(f"Animations {'enabled' if enabled else 'disabled'}")
-    
-    def _handle_compact_mode_toggled(self, event: Dict[str, Any]) -> None:
-        """
-        Handle compact mode toggled event.
-        
-        Args:
-            event: Event data
-        """
-        enabled = event.get("enabled")
-        if isinstance(enabled, bool):
-            self.compact_mode = enabled
-            self.logger.debug(f"Compact mode {'enabled' if enabled else 'disabled'}")
-    
-    def _handle_view_changed(self, event: Dict[str, Any]) -> None:
-        """
-        Handle view changed event.
-        
-        Args:
-            event: Event data
-        """
-        view = event.get("view")
-        if isinstance(view, str):
-            self.state["current_view"] = view
-            self.logger.debug(f"View updated to {view}")
-    
-    def _handle_notification(self, event: Dict[str, Any]) -> None:
-        """
-        Handle notification event.
-        
-        Args:
-            event: Event data
-        """
-        self.state["notification_count"] += 1
-        self.logger.debug(f"Notification received: {event.get('message')}")
-    
-    def _handle_error(self, event: Dict[str, Any]) -> None:
-        """
-        Handle error event.
-        
-        Args:
-            event: Event data
-        """
-        self.state["error_count"] += 1
-        self.logger.debug(f"Error received: {event.get('message')}")
-    
-    def startup(self) -> None:
+    def start(self):
         """Start the UI manager."""
+        # Start the web server
+        self._start_web_server()
+        
+        # Subscribe to events
+        self.event_bus.subscribe("settings.updated", self._on_settings_updated)
+        
         self.logger.info("UIManager started")
     
-    def shutdown(self) -> None:
+    def stop(self):
         """Stop the UI manager."""
+        # Stop the web server
+        if self.server:
+            self.server.shutdown()
+            self.server_thread.join()
+            self.server = None
+            self.server_thread = None
+        
+        # Unsubscribe from events
+        self.event_bus.unsubscribe("settings.updated", self._on_settings_updated)
+        
         self.logger.info("UIManager stopped")
-
-# Example usage
-if __name__ == "__main__":
-    # This is just for demonstration purposes
-    logging.basicConfig(level=logging.INFO)
     
-    # Initialize required components
-    event_bus = EventBus.get_instance()
-    event_bus.startup()
+    def _start_web_server(self):
+        """Start the web server."""
+        # Create a request handler with access to the UIManager instance
+        ui_manager = self
+        
+        class RequestHandler(BaseHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                self.ui_manager = ui_manager
+                super().__init__(*args, **kwargs)
+            
+            def log_message(self, format, *args):
+                # Redirect log messages to our logger
+                ui_manager.logger.debug(format % args)
+            
+            def do_GET(self):
+                """Handle GET requests."""
+                try:
+                    # Parse the URL
+                    parsed_url = urlparse(self.path)
+                    path = parsed_url.path
+                    
+                    # API endpoints
+                    if path.startswith("/api/"):
+                        if path == "/api/settings":
+                            self._handle_get_settings()
+                        elif path == "/api/models":
+                            self._handle_get_models(parsed_url)
+                        else:
+                            self.send_error(404, "API endpoint not found")
+                    
+                    # Static files
+                    else:
+                        self._serve_static_file(path)
+                
+                except Exception as e:
+                    ui_manager.error_handler.handle_error(
+                        e, ErrorCategory.UI, ErrorSeverity.ERROR,
+                        {"path": self.path, "method": "GET"}
+                    )
+                    self.send_error(500, str(e))
+            
+            def do_POST(self):
+                """Handle POST requests."""
+                try:
+                    # Parse the URL
+                    parsed_url = urlparse(self.path)
+                    path = parsed_url.path
+                    
+                    # Get the request body
+                    content_length = int(self.headers.get("Content-Length", 0))
+                    body = self.rfile.read(content_length).decode("utf-8")
+                    
+                    # Parse JSON body
+                    if content_length > 0:
+                        try:
+                            body = json.loads(body)
+                        except json.JSONDecodeError:
+                            self.send_error(400, "Invalid JSON")
+                            return
+                    
+                    # API endpoints
+                    if path == "/api/settings":
+                        self._handle_post_settings(body)
+                    elif path == "/api/chat":
+                        self._handle_post_chat(body)
+                    elif path == "/api/model":
+                        self._handle_post_model(body)
+                    else:
+                        self.send_error(404, "API endpoint not found")
+                
+                except Exception as e:
+                    ui_manager.error_handler.handle_error(
+                        e, ErrorCategory.UI, ErrorSeverity.ERROR,
+                        {"path": self.path, "method": "POST"}
+                    )
+                    self.send_error(500, str(e))
+            
+            def _handle_get_settings(self):
+                """Handle GET /api/settings."""
+                # Get the settings from the config manager
+                # Fixed: Use get_config() instead of get_all_config()
+                settings = ui_manager.config_manager.get_config()
+                
+                # Send the response
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(settings).encode("utf-8"))
+            
+            def _handle_get_models(self, parsed_url):
+                """Handle GET /api/models."""
+                # Parse query parameters
+                query = parse_qs(parsed_url.query)
+                provider = query.get("provider", ["openrouter"])[0]
+                
+                # Get models for the provider
+                models = ui_manager._get_models_for_provider(provider)
+                
+                # Send the response
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"models": models}).encode("utf-8"))
+            
+            def _handle_post_settings(self, body):
+                """Handle POST /api/settings."""
+                # Update the settings in the config manager
+                # Fixed: Use set_config() for each setting instead of update_config()
+                if isinstance(body, dict):
+                    for key, value in body.items():
+                        if isinstance(value, dict) and key == "providers":
+                            # Handle nested provider settings
+                            for provider, provider_settings in value.items():
+                                for setting_key, setting_value in provider_settings.items():
+                                    config_path = f"api.providers.{provider}.{setting_key}"
+                                    ui_manager.config_manager.set_config(config_path, setting_value)
+                        else:
+                            ui_manager.config_manager.set_config(key, value)
+                
+                # Save the settings
+                ui_manager.config_manager.save_config()
+                
+                # Publish an event
+                ui_manager.event_bus.publish(
+                    Event("settings.updated", {"settings": body})
+                )
+                
+                # Send the response
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": True}).encode("utf-8"))
+                
+                ui_manager.logger.info("Settings updated")
+            
+            def _handle_post_chat(self, body):
+                """Handle POST /api/chat."""
+                # Get the message from the request body
+                message = body.get("message", "")
+                
+                # Process the message
+                response = ui_manager._process_chat_message(message)
+                
+                # Send the response
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"response": response}).encode("utf-8"))
+                
+                ui_manager.logger.info(f"Chat message processed: {message}")
+            
+            def _handle_post_model(self, body):
+                """Handle POST /api/model."""
+                # Get the model from the request body
+                model = body.get("model", "")
+                provider = body.get("provider", "")
+                
+                # Update the model in the config manager
+                if provider:
+                    # Fixed: Use set_config() instead of update_config()
+                    ui_manager.config_manager.set_config(f"api.providers.{provider}.default_model", model)
+                
+                # Save the settings
+                ui_manager.config_manager.save_config()
+                
+                # Send the response
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": True}).encode("utf-8"))
+                
+                ui_manager.logger.info(f"Model updated: {provider}/{model}")
+            
+            def _serve_static_file(self, path):
+                """Serve a static file."""
+                # Map URL path to file path
+                if path == "/" or path == "":
+                    file_path = os.path.join(ui_manager.static_dir, "index.html")
+                else:
+                    # Remove leading slash
+                    path = path[1:] if path.startswith("/") else path
+                    file_path = os.path.join(ui_manager.static_dir, path)
+                
+                # Check if file exists
+                if not os.path.isfile(file_path):
+                    # Try index.html for directories
+                    if os.path.isdir(file_path):
+                        file_path = os.path.join(file_path, "index.html")
+                        if not os.path.isfile(file_path):
+                            self.send_error(404, "File not found")
+                            return
+                    else:
+                        self.send_error(404, "File not found")
+                        return
+                
+                # Determine content type
+                content_type = self._get_content_type(file_path)
+                
+                # Send the file
+                try:
+                    with open(file_path, "rb") as f:
+                        content = f.read()
+                    
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+                
+                except Exception as e:
+                    ui_manager.error_handler.handle_error(
+                        e, ErrorCategory.UI, ErrorSeverity.ERROR,
+                        {"path": path, "file_path": file_path}
+                    )
+                    self.send_error(500, str(e))
+            
+            def _get_content_type(self, file_path):
+                """Get the content type for a file."""
+                # Map file extensions to content types
+                content_types = {
+                    ".html": "text/html",
+                    ".css": "text/css",
+                    ".js": "application/javascript",
+                    ".json": "application/json",
+                    ".png": "image/png",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".gif": "image/gif",
+                    ".svg": "image/svg+xml",
+                    ".ico": "image/x-icon",
+                }
+                
+                # Get the file extension
+                _, ext = os.path.splitext(file_path)
+                
+                # Return the content type or default to binary
+                return content_types.get(ext.lower(), "application/octet-stream")
+        
+        # Create and start the server
+        self.server = HTTPServer((self.host, self.port), RequestHandler)
+        
+        # Start the server in a separate thread
+        self.server_thread = threading.Thread(target=self.server.serve_forever)
+        self.server_thread.daemon = True
+        self.server_thread.start()
+        
+        self.logger.info(f"Web server started at http://{self.host}:{self.port}")
     
-    error_handler = ErrorHandler.get_instance()
+    def _on_settings_updated(self, event):
+        """Handle settings updated event."""
+        # Nothing to do here for now
+        pass
     
-    config_manager = ConfigurationManager.get_instance()
+    def _process_chat_message(self, message):
+        """Process a chat message."""
+        # Get the default provider
+        provider_name = self.config_manager.get_config("defaultProvider", "openrouter")
+        
+        # Map provider name to APIProvider enum
+        provider_map = {
+            "openrouter": APIProvider.OPENROUTER,
+            "anthropic": APIProvider.ANTHROPIC,
+            "deepseek": APIProvider.DEEPSEEK,
+            "ollama": APIProvider.OLLAMA,
+            "litellm": APIProvider.LITELLM,
+        }
+        
+        provider = provider_map.get(provider_name)
+        if not provider:
+            return "Sorry, the selected API provider is not available. Please check your settings."
+        
+        # Get the adapter for the provider
+        adapter = self.api_manager.get_adapter(provider)
+        if not adapter:
+            return "Sorry, the selected API provider is not available. Please check your settings."
+        
+        # Get the model for the provider
+        model = self.config_manager.get_config(f"api.providers.{provider_name}.default_model")
+        
+        # Check if the provider is available
+        if not self.api_manager.check_provider_availability(provider):
+            return "Sorry, the selected API provider is not available. Please check your settings."
+        
+        # Process the message
+        try:
+            # Create a simple message format
+            messages = [
+                {"role": "user", "content": message}
+            ]
+            
+            # Call the adapter
+            response = adapter.generate_text(messages, model=model)
+            
+            return response
+        
+        except Exception as e:
+            self.error_handler.handle_error(
+                e, ErrorCategory.API, ErrorSeverity.ERROR,
+                {"provider": provider_name, "action": "generate_text"}
+            )
+            
+            return f"Sorry, there was an error processing your request: {str(e)}"
     
-    # Initialize UIManager
-    ui_manager = UIManager.get_instance()
-    ui_manager.startup()
+    def _get_models_for_provider(self, provider_name):
+        """Get available models for a provider."""
+        try:
+            # Map provider name to APIProvider enum
+            provider_map = {
+                "openrouter": APIProvider.OPENROUTER,
+                "anthropic": APIProvider.ANTHROPIC,
+                "deepseek": APIProvider.DEEPSEEK,
+                "ollama": APIProvider.OLLAMA,
+                "litellm": APIProvider.LITELLM,
+            }
+            
+            provider = provider_map.get(provider_name)
+            if not provider:
+                self.logger.warning(f"Unknown provider: {provider_name}")
+                return []
+            
+            # Get the adapter for the provider
+            adapter = self.api_manager.get_adapter(provider)
+            if not adapter:
+                self.logger.warning(f"No adapter found for provider: {provider_name}")
+                return []
+            
+            # Check if the provider is available
+            if not self.api_manager.check_provider_availability(provider):
+                self.logger.warning(f"Provider not available: {provider_name}")
+                # Return hardcoded models as fallback
+                return self._get_fallback_models(provider_name)
+            
+            # Get available models
+            if hasattr(adapter, 'get_available_models'):
+                try:
+                    # Run the async method in a new event loop
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        models = loop.run_until_complete(adapter.get_available_models())
+                        if models:
+                            self.logger.info(f"Successfully fetched {len(models)} models from {provider_name}")
+                            return models
+                        else:
+                            self.logger.warning(f"No models returned from {provider_name}, using fallback")
+                            return self._get_fallback_models(provider_name)
+                    except Exception as e:
+                        self.logger.error(f"Error fetching models from {provider_name}: {str(e)}")
+                        return self._get_fallback_models(provider_name)
+                    finally:
+                        loop.close()
+                except Exception as e:
+                    self.logger.error(f"Error setting up async loop for {provider_name}: {str(e)}")
+                    return self._get_fallback_models(provider_name)
+            else:
+                self.logger.warning(f"Adapter for {provider_name} does not have get_available_models method")
+                return self._get_fallback_models(provider_name)
+        
+        except Exception as e:
+            self.error_handler.handle_error(
+                e, ErrorCategory.API, ErrorSeverity.ERROR,
+                {"provider": provider_name}
+            )
+            return self._get_fallback_models(provider_name)
     
-    # Example usage
-    ui_manager.set_theme(UITheme.DARK)
-    ui_manager.set_font_size(16)
-    ui_manager.toggle_animations(True)
-    ui_manager.toggle_compact_mode(False)
-    ui_manager.change_view("settings")
-    ui_manager.show_notification("This is a test notification")
-    ui_manager.show_error("This is a test error")
-    
-    # Shutdown
-    ui_manager.shutdown()
-    event_bus.shutdown()
+    def _get_fallback_models(self, provider_name):
+        """Get fallback models for a provider when API call fails."""
+        self.logger.info(f"Using fallback models for {provider_name}")
+        
+        if provider_name == "openrouter":
+            return [
+                {"id": "anthropic/claude-3-opus", "name": "Claude 3 Opus"},
+                {"id": "openai/gpt-4-turbo", "name": "GPT-4 Turbo"},
+                {"id": "mistralai/mistral-large", "name": "Mistral Large"}
+            ]
+        elif provider_name == "anthropic":
+            return [
+                {"id": "claude-3-opus-20240229", "name": "Claude 3 Opus"},
+                {"id": "claude-3-sonnet-20240229", "name": "Claude 3 Sonnet"},
+                {"id": "claude-3-haiku-20240307", "name": "Claude 3 Haiku"}
+            ]
+        elif provider_name == "deepseek":
+            return [
+                {"id": "deepseek-chat", "name": "DeepSeek Chat"},
+                {"id": "deepseek-coder", "name": "DeepSeek Coder"}
+            ]
+        elif provider_name == "ollama":
+            return [
+                {"id": "llama3", "name": "Llama 3"},
+                {"id": "mistral", "name": "Mistral"},
+                {"id": "llama2", "name": "Llama 2"}
+            ]
+        elif provider_name == "litellm":
+            return [
+                {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo"},
+                {"id": "gpt-4", "name": "GPT-4"}
+            ]
+        else:
+            return []
