@@ -357,8 +357,8 @@ class UIManager:
     
     def _process_chat_message(self, message):
         """Process a chat message."""
-        # Get the default provider from settings
-        provider_name = self.config_manager.get_config("api.default_provider", "openrouter")
+        # Get the default provider
+        provider_name = self.config_manager.get_config("defaultProvider", "openrouter")
         
         # Map provider name to APIProvider enum
         provider_map = {
@@ -369,7 +369,7 @@ class UIManager:
             "litellm": APIProvider.LITELLM,
         }
         
-        provider = provider_map.get(provider_name.lower())
+        provider = provider_map.get(provider_name)
         if not provider:
             return "Sorry, the selected API provider is not available. Please check your settings."
         
@@ -378,8 +378,8 @@ class UIManager:
         if not adapter:
             return "Sorry, the selected API provider is not available. Please check your settings."
         
-        # Get the model for the provider - FIXED: Use the correct config path
-        model = self.config_manager.get_config(f"api.providers.{provider_name.lower()}.default_model")
+        # Get the model for the provider
+        model = self.config_manager.get_config(f"api.providers.{provider_name}.default_model")
         
         # Check if the provider is available
         if not self.api_manager.check_provider_availability(provider):
@@ -392,8 +392,7 @@ class UIManager:
                 {"role": "user", "content": message}
             ]
             
-            # Call the adapter - LOG WHAT WE'RE USING
-            self.logger.info(f"Using provider: {provider_name}, model: {model}")
+            # Call the adapter
             response = adapter.generate_text(messages, model=model)
             
             return response

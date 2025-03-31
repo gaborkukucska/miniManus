@@ -288,10 +288,8 @@ Your goal is to assist the user effectively while being efficient with resources
         
         # Get API key and model
         provider_key = default_provider_name.lower()
-        api_key = self.config_manager.get_api_key(provider_key)
-        model = self.config_manager.get_config(f"api.providers.{provider_key}.default_model", "")
-        
-        self.logger.info(f"Using provider: {provider_key}, model: {model}")
+        api_key = self.config_manager.get_config(f"api.{provider_key}.api_key", "")
+        model = self.config_manager.get_config(f"api.{provider_key}.default_model", "")
         
         try:
             # Get the plan
@@ -386,10 +384,8 @@ Your goal is to assist the user effectively while being efficient with resources
         
         # Get API key and model
         provider_key = default_provider_name.lower()
-        api_key = self.config_manager.get_api_key(provider_key)
-        model = self.config_manager.get_config(f"api.providers.{provider_key}.default_model", "")
-        
-        self.logger.info(f"Using provider: {provider_key}, model: {model}")
+        api_key = self.config_manager.get_config(f"api.{provider_key}.api_key", "")
+        model = self.config_manager.get_config(f"api.{provider_key}.default_model", "")
         
         # Prepare messages for final response
         final_messages = []
@@ -483,12 +479,10 @@ Your goal is to assist the user effectively while being efficient with resources
         if not adapter:
             return "I'm sorry, but I couldn't access the language model. Please check your API settings."
         
-        # Get API key and model - FIXED PATH HERE
+        # Get API key and model
         provider_key = default_provider_name.lower()
-        api_key = self.config_manager.get_api_key(provider_key)
-        model = self.config_manager.get_config(f"api.providers.{provider_key}.default_model", "")
-        
-        self.logger.info(f"Using provider: {provider_key}, model: {model}")
+        api_key = self.config_manager.get_config(f"api.{provider_key}.api_key", "")
+        model = self.config_manager.get_config(f"api.{provider_key}.default_model", "")
         
         try:
             # Get the response
