@@ -1,4 +1,3 @@
-```
 // script.js for miniManus
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -342,4 +341,3 @@ document.addEventListener('DOMContentLoaded', function() {
     // Initialize the UI
     initializeUI();
 });
-```
