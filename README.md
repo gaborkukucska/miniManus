@@ -1,6 +1,6 @@
-# miniManus
+# miniManus 🧑‍🏫🧑‍🚒👩‍🔧
 
-A mobile-focused framework that runs on Linux in Termux for Android phones, leveraging external APIs for LLM inference.
+A mobile-focused, agentic, local first LLM framework that runs on Linux in Termux for Android phones, leveraging external APIs for LLM inference.
 
 ## Overview
 
@@ -41,7 +41,7 @@ pkg install python git
 
 3. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/miniManus.git
+git clone https://github.com/gaborkukucska/miniManus.git
 cd miniManus
 ```
 
@@ -180,6 +180,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
-- Inspired by the Manus project
-- Built for the Termux community
-- Special thanks to all the LLM API providers
+- Inspired by the amazing Manus project
+- Built for the Termux / Android community
+- Special thanks to all the LLM API providers 🙌
