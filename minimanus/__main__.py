@@ -15,6 +15,7 @@ import asyncio
 import signal
 import time
 from pathlib import Path
+from typing import Optional # <<<--- LINE ADDED HERE
 
 # Define the base directory for miniManus data, logs, and config
 BASE_DIR = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share')) / 'minimanus'
@@ -109,7 +110,10 @@ async def main_async():
 
         # UI Layer
         ui_manager = UIManager.get_instance()
-        ui_manager.static_dir = str(BASE_DIR.parent.parent / 'minimanus' / 'static') # Adjust if needed based on install location
+        # Determine static directory relative to __main__.py's location
+        # Assumes __main__.py is in minimanus/ and static/ is in minimanus/static/
+        main_file_dir = Path(__file__).parent
+        ui_manager.static_dir = str(main_file_dir / 'static') # Adjust if needed based on install location
         ui_manager.startup()
 
         chat_interface = ChatInterface.get_instance()
