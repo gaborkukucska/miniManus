@@ -95,8 +95,8 @@ class EventBus:
         self.is_running = False
         self.worker_thread = None
         self._subscribers_lock = threading.RLock()
-        self._event_counter = 0  # Counter for tiebreaking events with same priority
-        self._counter_lock = threading.Lock()  # Lock for thread-safe counter updates
+        self._event_counter = 0  # Add counter for tiebreaking
+        self._counter_lock = threading.Lock()  # Lock for the counter
         
         self.logger.info("EventBus initialized")
     
@@ -222,6 +222,7 @@ class EventBus:
         while self.is_running:
             try:
                 # Get the next event from the queue
+                # Update to unpack three values instead of two
                 _, _, event = self.event_queue.get(timeout=0.1)
                 
                 # Check for sentinel event
