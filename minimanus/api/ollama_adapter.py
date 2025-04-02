@@ -287,6 +287,9 @@ class OllamaAdapter:
             # Use the provided model or fall back to default
             model_name = model or self.default_model
             
+            # Log the model we're using
+            self.logger.info(f"Generating text with Ollama model: {model_name}")
+            
             # Convert messages to Ollama format
             prompt = ""
             system_prompt = None
@@ -316,6 +319,24 @@ class OllamaAdapter:
             
             if system_prompt:
                 payload["system"] = system_prompt
+                
+            # Before making the API request, check if the model exists
+            try:
+                models_response = requests.get(f"{self.base_url}/api/tags", timeout=self.timeout)
+                if models_response.status_code == 200:
+                    models_data = models_response.json()
+                    available_models = [model.get("name") for model in models_data.get("models", [])]
+                    
+                    if model_name not in available_models:
+                        self.logger.warning(f"Model {model_name} not found in Ollama. Available models: {available_models}")
+                        if available_models:
+                            # Use the first available model as fallback
+                            payload["model"] = available_models[0]
+                            self.logger.info(f"Falling back to model: {available_models[0]}")
+                        else:
+                            return "I'm sorry, but no models are available in Ollama."
+            except Exception as e:
+                self.logger.warning(f"Error checking available models: {str(e)}")
             
             # Make the API request
             response = requests.post(
@@ -330,7 +351,10 @@ class OllamaAdapter:
             else:
                 error_message = f"Ollama API error: {response.status_code} - {response.text}"
                 self.logger.error(error_message)
-                return f"I'm sorry, but the ollama API is not available. Please check your API settings and ensure you've entered a valid API key."
+                if response.status_code == 404 and "model" in response.text:
+                    return f"I'm sorry, but the model '{model_name}' is not available in Ollama. Please check your Ollama installation and make sure this model is installed."
+                else:
+                    return f"I'm sorry, but the Ollama API is not available. Please check your API settings."
                 
         except Exception as e:
             error_message = f"Error generating text with Ollama: {str(e)}"
@@ -355,6 +379,9 @@ class OllamaAdapter:
             # Use the provided model or fall back to default
             model_name = model or self.default_model
             
+            # Log the model we're using
+            self.logger.info(f"Generating text with Ollama model: {model_name}")
+            
             # Convert messages to Ollama format
             prompt = ""
             system_prompt = None
@@ -384,6 +411,28 @@ class OllamaAdapter:
             
             if system_prompt:
                 payload["system"] = system_prompt
+             
+            # Before making the API request, check if the model exists
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{self.base_url}/api/tags",
+                        timeout=self.timeout
+                    ) as models_response:
+                        if models_response.status == 200:
+                            models_data = await models_response.json()
+                            available_models = [model.get("name") for model in models_data.get("models", [])]
+                            
+                            if model_name not in available_models:
+                                self.logger.warning(f"Model {model_name} not found in Ollama. Available models: {available_models}")
+                                if available_models:
+                                    # Use the first available model as fallback
+                                    payload["model"] = available_models[0]
+                                    self.logger.info(f"Falling back to model: {available_models[0]}")
+                                else:
+                                    return "I'm sorry, but no models are available in Ollama."
+            except Exception as e:
+                self.logger.warning(f"Error checking available models: {str(e)}")
             
             # Make the API request
             async with aiohttp.ClientSession() as session:
@@ -399,7 +448,10 @@ class OllamaAdapter:
                         error_text = await response.text()
                         error_message = f"Ollama API error: {response.status} - {error_text}"
                         self.logger.error(error_message)
-                        return f"I'm sorry, but the ollama API is not available. Please check your API settings and ensure you've entered a valid API key."
+                        if response.status == 404 and "model" in await response.text():
+                            return f"I'm sorry, but the model '{model_name}' is not available in Ollama. Please check your Ollama installation and make sure this model is installed."
+                        else:
+                            return f"I'm sorry, but the Ollama API is not available. Please check your API settings."
                         
         except Exception as e:
             error_message = f"Error generating text with Ollama: {str(e)}"
