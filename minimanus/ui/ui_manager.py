@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 from enum import Enum, auto
 from pathlib import Path
+from typing import Dict, List, Optional, Any # <<<--- LINE ADDED HERE
 
 # Import local modules
 try:
@@ -194,7 +195,8 @@ class UIManager:
                 if path == "/api/settings":
                     self._handle_get_settings()
                 elif path == "/api/models":
-                    self._handle_get_models(parsed_url)
+                    # Needs to be async to call model interface
+                    asyncio.run_coroutine_threadsafe(self._handle_get_models(parsed_url), self.ui_manager.get_event_loop())
                 elif path == "/api/sessions":
                     self._handle_get_sessions()
                 else:
@@ -212,27 +214,34 @@ class UIManager:
                     self.logger.error(f"Error getting settings: {e}", exc_info=True)
                     self.send_error_response(500, "Failed to retrieve settings", str(e))
 
-            def _handle_get_models(self, parsed_url):
-                """Handle GET /api/models."""
-                query = parse_qs(parsed_url.query)
-                provider_name = query.get("provider", [None])[0]
+            async def _handle_get_models(self, parsed_url):
+                """Handle GET /api/models (async)."""
+                try:
+                    query = parse_qs(parsed_url.query)
+                    provider_name = query.get("provider", [None])[0]
+                    models_info = []
 
-                if not provider_name:
-                    models_info = self.model_selection_interface.get_all_models()
-                else:
-                    try:
-                        provider_enum = APIProvider[provider_name.upper()]
-                        models_info = self.model_selection_interface.get_models_by_provider(provider_enum)
-                    except KeyError:
-                         self.send_error_response(400, f"Invalid provider name: {provider_name}")
-                         return
-                    except Exception as e:
-                        self.logger.error(f"Error getting models for provider {provider_name}: {e}", exc_info=True)
-                        self.send_error_response(500, f"Failed to retrieve models for {provider_name}", str(e))
-                        return
+                    if not provider_name:
+                        models_info = await self.model_selection_interface.get_all_models()
+                    else:
+                        try:
+                            provider_enum = APIProvider[provider_name.upper()]
+                            models_info = await self.model_selection_interface.get_models_by_provider(provider_enum)
+                        except KeyError:
+                             self.send_error_response(400, f"Invalid provider name: {provider_name}")
+                             return
+                        except Exception as e:
+                            self.logger.error(f"Error getting models for provider {provider_name}: {e}", exc_info=True)
+                            self.send_error_response(500, f"Failed to retrieve models for {provider_name}", str(e))
+                            return
 
-                models_dict = [m.to_dict() for m in models_info]
-                self.send_json_response(200, {"models": models_dict})
+                    models_dict = [m.to_dict() for m in models_info]
+                    self.send_json_response(200, {"models": models_dict})
+                except Exception as e:
+                    # Catch errors within the async handler
+                    self.logger.error(f"Async error handling GET /api/models: {e}", exc_info=True)
+                    self.send_error_response(500, "Internal server error processing models request.")
+
 
             def _handle_get_sessions(self):
                 """Handle GET /api/sessions."""
@@ -254,20 +263,24 @@ class UIManager:
 
                     content_length = int(self.headers.get("Content-Length", 0))
                     if content_length == 0:
-                         self.send_error_response(400, "Request body is empty")
-                         return
-
-                    body_raw = self.rfile.read(content_length).decode("utf-8")
-                    try:
-                        body = json.loads(body_raw)
-                    except json.JSONDecodeError:
-                        self.send_error_response(400, "Invalid JSON format in request body")
-                        return
+                         # Allow empty body for some actions if needed later
+                         # self.send_error_response(400, "Request body is empty")
+                         body_raw = ""
+                         body = {} # Assume empty dict if body is missing
+                    else:
+                        body_raw = self.rfile.read(content_length).decode("utf-8")
+                        try:
+                            body = json.loads(body_raw)
+                        except json.JSONDecodeError:
+                            self.send_error_response(400, "Invalid JSON format in request body")
+                            return
 
                     if path == "/api/settings":
                         self._handle_post_settings(body)
                     elif path == "/api/chat":
                         self._handle_post_chat(body)
+                    elif path == "/api/discover_models": # Added endpoint
+                         asyncio.run_coroutine_threadsafe(self._handle_discover_models(), self.ui_manager.get_event_loop())
                     # Add other POST endpoints as needed (e.g., creating sessions)
                     else:
                         self.send_error_response(404, "API endpoint not found")
@@ -285,16 +298,31 @@ class UIManager:
                     regular_settings = {}
 
                     for key, value in body.items():
-                        # Simple check if key likely represents an API key
-                        if "api_key" in key.lower() and isinstance(value, str):
-                            # Extract provider name (assuming format like 'api.provider.api_key')
-                            parts = key.split('.')
-                            if len(parts) == 3 and parts[0] == 'api' and parts[2] == 'api_key':
-                                provider_name = parts[1]
+                        # Check for API key patterns (more robust check might be needed)
+                        is_api_key_field = (
+                            (isinstance(key, str) and "api_key" in key.lower()) or # Direct key name check
+                            (key == "api.openrouter.api_key") or # Specific keys
+                            (key == "api.anthropic.api_key") or
+                            (key == "api.deepseek.api_key") or
+                            (key == "api.litellm.api_key")
+                        )
+
+                        if is_api_key_field and isinstance(value, str):
+                            # Extract provider name
+                            # Example key formats: "openrouter-api-key", "api.openrouter.api_key"
+                            provider_name = None
+                            if key.startswith("api.") and key.endswith(".api_key"):
+                                parts = key.split('.')
+                                if len(parts) == 3:
+                                     provider_name = parts[1]
+                            elif "-api-key" in key: # Handle format like "openrouter-api-key"
+                                 provider_name = key.replace("-api-key", "")
+
+                            if provider_name:
                                 api_keys_to_set[provider_name] = value
                             else:
-                                # Handle potentially different key formats if needed
-                                regular_settings[key] = value
+                                self.logger.warning(f"Could not determine provider for API key field: {key}")
+                                regular_settings[key] = value # Treat as regular if provider not clear
                         else:
                            regular_settings[key] = value
 
@@ -364,6 +392,15 @@ class UIManager:
                     self.error_handler.handle_error(e, ErrorCategory.UI, ErrorSeverity.ERROR, {"action": "post_chat"})
                     self.send_error_response(500, "Error processing message", str(e))
 
+            async def _handle_discover_models(self):
+                 """Handle POST /api/discover_models (async)."""
+                 try:
+                     await self.model_selection_interface.discover_models()
+                     self.send_json_response(200, {"status": "success", "message": "Model discovery initiated."})
+                 except Exception as e:
+                     self.logger.error(f"Error initiating model discovery: {e}", exc_info=True)
+                     self.send_error_response(500, "Failed to start model discovery", str(e))
+
 
             # --- Static File Serving ---
             def _serve_static_file(self, path):
@@ -382,14 +419,7 @@ class UIManager:
 
                 # Check if file exists and is within the static directory
                 if not file_path.is_file() or not str(file_path.resolve()).startswith(str(Path(self.ui_manager.static_dir).resolve())):
-                    # Try index.html for directories (less common for APIs, more for UIs)
-                    # if file_path.is_dir():
-                    #     file_path = file_path / "index.html"
-                    #     if not file_path.is_file():
-                    #          self.send_error_response(404, "File not found")
-                    #          return
-                    # else:
-                    self.send_error_response(404, "File not found")
+                    self.send_error_response(404, f"File not found: {path}")
                     return
 
                 # Determine content type
@@ -400,6 +430,12 @@ class UIManager:
                     self.send_response(200)
                     self.send_header("Content-Type", content_type)
                     self.send_header("Content-Length", str(file_path.stat().st_size))
+                    # Add Cache-Control header for better performance
+                    if content_type in ["text/css", "application/javascript", "image/png", "image/jpeg", "image/gif", "image/svg+xml", "image/x-icon"]:
+                        self.send_header("Cache-Control", "public, max-age=3600") # Cache for 1 hour
+                    else:
+                        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+
                     self.end_headers()
                     with file_path.open("rb") as f:
                         self.wfile.write(f.read())
@@ -407,7 +443,6 @@ class UIManager:
                     self.logger.error(f"Error serving static file {file_path}: {e}", exc_info=True)
                     self.error_handler.handle_error(e, ErrorCategory.UI, ErrorSeverity.ERROR, {"path": path, "file_path": str(file_path)})
                     # Don't send another response if headers might already be sent
-                    # self.send_error_response(500, "Error serving file", str(e))
 
 
             def _get_content_type(self, file_path: Path) -> str:
