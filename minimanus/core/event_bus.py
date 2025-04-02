@@ -95,6 +95,8 @@ class EventBus:
         self.is_running = False
         self.worker_thread = None
         self._subscribers_lock = threading.RLock()
+        self._event_counter = 0  # Counter for tiebreaking events with same priority
+        self._counter_lock = threading.Lock()  # Lock for thread-safe counter updates
         
         self.logger.info("EventBus initialized")
     
@@ -169,7 +171,13 @@ class EventBus:
         
         # Queue event for asynchronous processing
         priority_value = 100 - event.priority.value  # Invert priority for queue (lower value = higher priority)
-        self.event_queue.put((priority_value, event))
+        
+        # Use a counter as tiebreaker for events with the same priority
+        with self._counter_lock:
+            counter = self._event_counter
+            self._event_counter += 1
+        
+        self.event_queue.put((priority_value, counter, event))
         
         self.logger.debug(f"Published event: {event}")
     
@@ -202,7 +210,7 @@ class EventBus:
         self.is_running = False
         
         # Add a sentinel event to unblock the queue
-        self.event_queue.put((0, None))
+        self.event_queue.put((0, 0, None))
         
         if self.worker_thread and self.worker_thread.is_alive():
             self.worker_thread.join(timeout=2.0)
@@ -214,7 +222,7 @@ class EventBus:
         while self.is_running:
             try:
                 # Get the next event from the queue
-                _, event = self.event_queue.get(timeout=0.1)
+                _, _, event = self.event_queue.get(timeout=0.1)
                 
                 # Check for sentinel event
                 if event is None:
