@@ -664,7 +664,7 @@ class SettingsPanel:
             "Default Model",
             "Default model to use with Ollama",
             SettingType.STRING,
-            "llama3",
+            "llama3",  # Updated default to match common Ollama model names
             None,
             "api_ollama",
             1
