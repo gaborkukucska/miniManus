@@ -121,7 +121,13 @@ def main():
         os.makedirs(os.path.join(os.environ.get('HOME', '.'), '.local', 'share', 'minimanus', 'plugins'), exist_ok=True)
         
         # Run the async main function
-        loop = asyncio.get_event_loop()
+        # Fixed: Use get_running_loop or create a new one to avoid deprecation warning
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
         main_task = loop.create_task(main_async())
         
         try:
