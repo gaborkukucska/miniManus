@@ -1,185 +1,150 @@
-# miniManus 🧑‍🏫🧑‍🚒👩‍🔧
+# miniManus 🧑‍💻🤖📱
 
-A mobile-focused, agentic, local first LLM framework that runs on Linux in Termux for Android phones, leveraging external APIs for LLM inference.
+A mobile-focused, agentic LLM framework designed to run on Linux (via Termux) on Android devices. It leverages local and external APIs for powerful, on-the-go AI interaction and task automation.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<!-- Add other badges as relevant: build status, version, etc. -->
 
 ## Overview
 
-miniManus is a lightweight framework inspired by Manus, designed specifically to run on Android devices through the Termux application. It provides a mobile-optimized interface for interacting with various LLM providers including OpenRouter, DeepSeek, Anthropic, Ollama, and LiteLLM.
+miniManus is a lightweight framework inspired by projects like AutoGen and CrewAI, but specifically optimized for the resource constraints of mobile devices running Termux. It provides a web-based UI for chat interactions and aims to enable complex task execution through an agentic system that can plan and utilize various capabilities (tools).
 
-The framework is built with mobile constraints in mind, focusing on efficient resource usage, responsive UI, and flexible API integration options. miniManus can connect to external API providers or locally hosted models, making it versatile for various use cases.
+The framework supports multiple LLM providers (local and cloud-based) and includes features for dynamic model discovery and configuration.
 
-## Features
+**Goal:** To provide a powerful, extensible, and resource-conscious agentic AI framework accessible directly from your Android phone.
 
-- **Mobile-Optimized UI**: Responsive interface designed specifically for mobile devices
-- **Multiple API Providers**: Support for OpenRouter, DeepSeek, Anthropic, Ollama, and LiteLLM
-- **Local Model Discovery**: Automatic discovery of Ollama and LiteLLM servers on the local network
-- **Resource Efficiency**: Designed to work within the constraints of mobile devices
-- **Persistent Chat Sessions**: Save and restore chat conversations
-- **Customizable Settings**: Comprehensive settings management
-- **Model Selection**: Browse, search, and select from available models
-- **Plugin System**: Extensible through plugins
-- **Comprehensive Documentation**: Including a function index to help LLM models avoid typos
+## Key Features
+
+*   **Mobile-First:** Designed and optimized for Termux on Android.
+*   **Web-Based UI:** Accessible interface for chat and settings via `http://localhost:8080`.
+*   **Multiple LLM Providers:** Supports:
+    *   Ollama (Local)
+    *   LiteLLM (Local Proxy)
+    *   OpenRouter
+    *   Anthropic (Claude)
+    *   DeepSeek
+*   **Local Network Discovery:** Automatically finds running Ollama and LiteLLM instances on your network (configurable).
+*   **Agentic System (Developing):** Core components in place for planning and tool usage.
+    *   Planning using LLM reasoning.
+    *   Capability registry for adding tools (e.g., web search, file access - *use with caution*).
+*   **Configuration Management:** Easy setup via UI or JSON files (`~/.local/share/minimanus/config/`). Secure storage for API keys.
+*   **Chat Interface:** Persistent chat sessions stored locally.
+*   **Model Management:** Browse available models from configured providers.
+*   **Resource Aware:** Core components monitor basic system resources (memory, CPU).
+*   **(Planned) Plugin System:** Architecture supports future extensibility via plugins.
 
 ## Installation
 
 ### Prerequisites
 
-- Android device with [Termux](https://termux.com/) installed
-- Python 3.10+ installed in Termux
+*   Android device (Android 7.0+ recommended).
+*   [Termux](https://f-droid.org/en/packages/com.termux/) installed from F-Droid (Google Play version is deprecated and won't work).
+*   Python 3.10+ installed in Termux (`pkg install python`).
+*   Git installed in Termux (`pkg install git`).
+*   Internet connection (for initial setup, package downloads, and external API access).
 
-### Basic Installation
+### Steps
 
-1. Update Termux packages:
-```bash
-pkg update && pkg upgrade
-```
+1.  **Update Termux Packages:**
+    ```bash
+    pkg update && pkg upgrade -y
+    ```
 
-2. Install required packages:
-```bash
-pkg install python git
-```
+2.  **Install Required System Packages:**
+    ```bash
+    pkg install -y python git openssl rust # Rust/openssl often needed for Python crypto libs
+    ```
 
-3. Clone the repository:
-```bash
-git clone https://github.com/gaborkukucska/miniManus.git
-cd miniManus
-```
+3.  **Clone the Repository:**
+    ```bash
+    git clone https://github.com/gaborkukucska/miniManus.git
+    cd miniManus
+    ```
 
-4. Install Python dependencies:
-```bash
-pip install -r requirements.txt
-```
+4.  **Install Python Dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+    *(Note: Installation of some packages like `cryptography` or `numpy` might take time in Termux as they may need compilation.)*
 
-5. Run miniManus:
-```bash
-python -m minimanus
-```
+5.  **Run miniManus:**
+    ```bash
+    python -m minimanus
+    ```
+
+6.  **Access the UI:** Open a web browser on your Android device (or another device on the same network if firewall allows) and navigate to `http://localhost:8080` (or the IP address of your phone and port 8080).
 
 ## Configuration
 
-miniManus can be configured through the settings interface or by directly editing the configuration files located in `~/.local/share/minimanus/config/`.
+Configuration is managed primarily through the web UI's **Settings** tab, but can also be done by editing files directly.
 
-### API Keys
+**Configuration Files Location:** `~/.local/share/minimanus/config/`
 
-To use external API providers, you'll need to set up API keys:
+*   `config.json`: General settings, UI preferences, provider URLs, etc.
+*   `secrets.json`: Stores sensitive information like API keys. **Permissions are set to 600 (user read/write only).**
 
-1. Open miniManus
-2. Navigate to Settings > API
-3. Select your preferred provider
-4. Enter your API key
+### API Keys & Providers
 
-Alternatively, you can add API keys to the configuration file:
-```bash
-mkdir -p ~/.local/share/minimanus/config
-echo '{"api_keys": {"openrouter": "your-api-key-here"}}' > ~/.local/share/minimanus/config/api_keys.json
-```
+1.  **Navigate to Settings:** Open the miniManus UI (`http://localhost:8080`) and click the "Settings" tab.
+2.  **Select Provider:** Use the "Default API Provider" dropdown to choose your primary provider.
+3.  **Enter Details:** Find the section for your chosen provider(s) (e.g., "OpenRouter Settings", "Ollama Settings").
+    *   **API Keys:** Enter your API keys into the masked password fields.
+    *   **Host URLs:** For local providers like Ollama or LiteLLM, ensure the "Host URL" points to the correct address and port where the service is running (e.g., `http://192.168.1.100:11434`). Discovery attempts to find these automatically but manual configuration might be needed.
+    *   **Default Model:** Select the default model you want to use *for that specific provider*.
+4.  **Save Settings:** Click the "Save All Settings" button at the bottom. API keys will be saved securely to `secrets.json`.
+
+*(Ensure any local services like Ollama or LiteLLM are running and accessible from your phone before configuring and using them.)*
 
 ## Usage
 
-### Starting miniManus
+1.  **Start miniManus:** Run `python -m minimanus` in your Termux terminal within the `miniManus` directory.
+2.  **Open UI:** Access `http://localhost:8080` in your browser.
+3.  **Chat:** Use the main "Chat" tab to send messages. The backend will process the request using the configured default provider/model or potentially engage the agent system for complex tasks.
+4.  **Settings:** Configure API providers, UI appearance, and other options in the "Settings" tab.
 
-```bash
-python -m minimanus
-```
+## Architecture Overview
 
-### Chat Interface
+miniManus uses a modular architecture:
 
-The chat interface allows you to:
-- Create new chat sessions
-- Send messages to LLM models
-- View and manage chat history
-- Switch between different models
-
-### Model Selection
-
-The model selection interface allows you to:
-- Browse available models from different providers
-- Search for specific models
-- Mark favorite models
-- Configure model parameters
-
-### Settings
-
-The settings panel allows you to customize:
-- UI appearance (theme, font size, animations)
-- Default models and system prompts
-- API providers and caching behavior
-- Advanced system settings
-
-## Architecture
-
-miniManus follows a modular architecture with the following components:
-
-### Core Framework
-- **SystemManager**: Coordinates system startup and shutdown
-- **ConfigurationManager**: Manages configuration settings
-- **EventBus**: Facilitates communication between components
-- **ResourceMonitor**: Monitors system resources
-- **ErrorHandler**: Handles and logs errors
-- **PluginManager**: Manages plugins
-
-### API Integrations
-- **APIManager**: Coordinates API interactions
-- **Provider Adapters**: Interfaces with specific API providers
-
-### UI Components
-- **UIManager**: Manages UI state and appearance
-- **ChatInterface**: Handles chat sessions and messages
-- **SettingsPanel**: Manages settings
-- **ModelSelectionInterface**: Handles model discovery and selection
-
-### Utility Services
-- **Logger**: Handles logging
-- **NetworkUtils**: Network-related utilities
-- **FileUtils**: File operations
-- **SecurityUtils**: Security-related functions
-
-## Extending miniManus
-
-### Creating Plugins
-
-Plugins can extend miniManus functionality. To create a plugin:
-
-1. Create a new directory in `~/.local/share/minimanus/plugins/`
-2. Create a Python file with your plugin code
-3. Implement the `PluginInterface` class
-4. Add a `plugin.json` file with metadata
-
-Example plugin structure:
-```
-my_plugin/
-├── __init__.py
-├── plugin.json
-└── my_module.py
-```
-
-Example plugin.json:
-```json
-{
-  "name": "My Plugin",
-  "version": "1.0.0",
-  "description": "An example plugin",
-  "author": "Your Name",
-  "dependencies": []
-}
-```
+*   **Core Framework (`minimanus/core/`)**
+    *   `SystemManager`: Coordinates startup, shutdown, and component lifecycle. Handles signals.
+    *   `ConfigManager`: Loads/saves `config.json` and `secrets.json`.
+    *   `EventBus`: Decoupled communication between components.
+    *   `ErrorHandler`: Centralized error logging and handling.
+    *   `ResourceMonitor`: Basic monitoring of memory, CPU, storage (limited by Termux).
+    *   `AgentSystem`: Orchestrates planning and tool/capability execution (under development).
+    *   `PluginManager`: Manages loading/unloading of plugins (future feature).
+*   **API Integrations (`minimanus/api/`)**
+    *   `APIManager`: Central point for sending requests. Handles provider selection, caching (basic).
+    *   `Provider Adapters` (e.g., `OllamaAdapter`, `OpenRouterAdapter`): Implement communication specifics for each LLM provider API using `asyncio` and `aiohttp`. Include discovery logic for local providers.
+*   **UI Layer (`minimanus/ui/`)**
+    *   `UIManager`: Manages the backend web server (Python `http.server`) serving the UI. Provides API endpoints (`/api/*`) for the frontend.
+    *   `ChatInterface`: Manages chat sessions, message history persistence, and routes user messages to the `AgentSystem`.
+    *   `SettingsPanel`: Defines available settings (interacts with `ConfigManager`).
+    *   `ModelSelectionInterface`: Manages discovery and information about available models.
+*   **Web UI (`minimanus/static/`)**
+    *   `index.html`, `styles.css`, `script.js`: Frontend single-page application that interacts with the backend API endpoints.
+*   **Utilities (`minimanus/utils/`)**
+    *   (Placeholder for common helper functions - network, file ops, security).
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please follow standard GitHub practices:
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+1.  Fork the repository.
+2.  Create a feature branch (`git checkout -b feature/your-amazing-feature`).
+3.  Make your changes and commit them (`git commit -m 'Add some amazing feature'`).
+4.  Push to your branch (`git push origin feature/your-amazing-feature`).
+5.  Open a Pull Request against the `main` branch of the original repository.
+
+Please ensure your code follows basic Python standards (PEP 8) and includes docstrings where appropriate.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License - see the `LICENSE` file (if available) or the standard MIT license text.
 
 ## Acknowledgments
 
-- Inspired by the amazing Manus project
-- Built for the Termux / Android community
-- Special thanks to all the LLM API providers 🙌
+*   Inspired by agentic frameworks like AutoGen, CrewAI, and the original Manus concept.
+*   Built for the powerful Termux environment on Android, by Gemini2.5 🙌
+*   Thanks to the developers of the LLM APIs and local inference tools (Ollama, LiteLLM).
