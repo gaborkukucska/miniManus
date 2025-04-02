@@ -4,6 +4,7 @@ import json
 import logging
 import asyncio
 import threading
+import socketserver
 from typing import Dict, List, Any, Optional
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -69,16 +70,12 @@ class UIManager:
         self.static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "static"))
         
         # Server instance
-        self.server = None
+        self.httpd = None
         self.server_thread = None
         
         self.logger.info("UIManager initialized")
     
-    def startup(self):
-        """Start the UI manager (alias for start method for consistency with other components)."""
-        self.start()
-    
-    def start(self):
+    def startup(self) -> None:
         """Start the UI manager."""
         # Start the web server
         self._start_web_server()
@@ -88,14 +85,24 @@ class UIManager:
         
         self.logger.info("UIManager started")
     
-    def stop(self):
+    def shutdown(self) -> None:
         """Stop the UI manager."""
-        # Stop the web server
-        if self.server:
-            self.server.shutdown()
-            self.server_thread.join()
-            self.server = None
-            self.server_thread = None
+        # Stop web server if it's running
+        if hasattr(self, 'httpd') and self.httpd:
+            try:
+                # First shutdown the server (stops serve_forever loop)
+                self.httpd.shutdown()
+                
+                # Then close the socket to release the port
+                self.httpd.server_close()
+                
+                # Wait for server thread to terminate
+                if self.server_thread and self.server_thread.is_alive():
+                    self.server_thread.join(timeout=2.0)
+                
+                self.logger.info("Web server stopped and port released")
+            except Exception as e:
+                self.logger.error(f"Error shutting down web server: {e}")
         
         # Unsubscribe from events
         self.event_bus.unsubscribe("settings.updated", self._on_settings_updated)
@@ -107,7 +114,7 @@ class UIManager:
         # Create a request handler with access to the UIManager instance
         ui_manager = self
         
-        class RequestHandler(BaseHTTPRequestHandler):
+        class CustomHandler(BaseHTTPRequestHandler):
             def __init__(self, *args, **kwargs):
                 self.ui_manager = ui_manager
                 super().__init__(*args, **kwargs)
@@ -182,7 +189,6 @@ class UIManager:
             def _handle_get_settings(self):
                 """Handle GET /api/settings."""
                 # Get the settings from the config manager
-                # Fixed: Use get_config() instead of get_all_config()
                 settings = ui_manager.config_manager.get_config()
                 
                 # Send the response
@@ -209,15 +215,20 @@ class UIManager:
             def _handle_post_settings(self, body):
                 """Handle POST /api/settings."""
                 # Update the settings in the config manager
-                # Fixed: Use set_config() for each setting instead of update_config()
                 if isinstance(body, dict):
                     for key, value in body.items():
-                        if isinstance(value, dict) and key == "providers":
+                        if key == "providers":
                             # Handle nested provider settings
                             for provider, provider_settings in value.items():
                                 for setting_key, setting_value in provider_settings.items():
-                                    config_path = f"api.providers.{provider}.{setting_key}"
-                                    ui_manager.config_manager.set_config(config_path, setting_value)
+                                    # Make sure we handle model selection properly
+                                    if setting_key == "model":
+                                        config_path = f"api.{provider}.default_model"
+                                        ui_manager.config_manager.set_config(config_path, setting_value)
+                                        ui_manager.logger.info(f"Set {provider} model to {setting_value}")
+                                    else:
+                                        config_path = f"api.providers.{provider}.{setting_key}"
+                                        ui_manager.config_manager.set_config(config_path, setting_value)
                         else:
                             ui_manager.config_manager.set_config(key, value)
                 
@@ -225,9 +236,7 @@ class UIManager:
                 ui_manager.config_manager.save_config()
                 
                 # Publish an event
-                ui_manager.event_bus.publish(
-                    Event("settings.updated", {"settings": body})
-                )
+                ui_manager.event_bus.publish_event("settings.updated", {"settings": body})
                 
                 # Send the response
                 self.send_response(200)
@@ -259,10 +268,18 @@ class UIManager:
                 model = body.get("model", "")
                 provider = body.get("provider", "")
                 
-                # Update the model in the config manager
-                if provider:
-                    # Fixed: Use set_config() instead of update_config()
-                    ui_manager.config_manager.set_config(f"api.providers.{provider}.default_model", model)
+                if provider and model:
+                    # Update the model in the config manager
+                    config_path = f"api.{provider}.default_model"
+                    ui_manager.config_manager.set_config(config_path, model)
+                    ui_manager.logger.info(f"Updated model for {provider} to: {model}")
+                    
+                    # Also update the matching provider in adapters
+                    if provider == "ollama":
+                        adapter = ui_manager.api_manager.get_adapter(APIProvider.OLLAMA)
+                        if adapter:
+                            adapter.default_model = model
+                            ui_manager.logger.info(f"Updated Ollama adapter default model to: {model}")
                 
                 # Save the settings
                 ui_manager.config_manager.save_config()
@@ -340,11 +357,14 @@ class UIManager:
                 # Return the content type or default to binary
                 return content_types.get(ext.lower(), "application/octet-stream")
         
+        # Enable address reuse to prevent "Address already in use" errors on restart
+        socketserver.TCPServer.allow_reuse_address = True
+        
         # Create and start the server
-        self.server = HTTPServer((self.host, self.port), RequestHandler)
+        self.httpd = HTTPServer((self.host, self.port), CustomHandler)
         
         # Start the server in a separate thread
-        self.server_thread = threading.Thread(target=self.server.serve_forever)
+        self.server_thread = threading.Thread(target=self.httpd.serve_forever)
         self.server_thread.daemon = True
         self.server_thread.start()
         
@@ -352,8 +372,22 @@ class UIManager:
     
     def _on_settings_updated(self, event):
         """Handle settings updated event."""
-        # Nothing to do here for now
-        pass
+        # Reload configuration when settings are updated
+        settings = event.data.get("settings", {})
+        
+        # Handle theme changes
+        if "theme" in settings:
+            theme_name = settings["theme"]
+            try:
+                theme = UITheme[theme_name.upper()]
+                self.set_theme(theme)
+            except (KeyError, AttributeError):
+                self.logger.warning(f"Invalid theme: {theme_name}")
+        
+        # Handle API provider changes
+        if "defaultProvider" in settings:
+            provider = settings["defaultProvider"]
+            self.logger.info(f"Default provider changed to {provider}")
     
     def _process_chat_message(self, message):
         """Process a chat message."""
@@ -378,8 +412,8 @@ class UIManager:
         if not adapter:
             return "Sorry, the selected API provider is not available. Please check your settings."
         
-        # Get the model for the provider - FIXED: Use the correct config path
-        model = self.config_manager.get_config(f"api.providers.{provider_name.lower()}.default_model")
+        # Get the model for the provider - Fixed config path
+        model = self.config_manager.get_config(f"api.{provider_name.lower()}.default_model")
         
         # Check if the provider is available
         if not self.api_manager.check_provider_availability(provider):
@@ -392,7 +426,7 @@ class UIManager:
                 {"role": "user", "content": message}
             ]
             
-            # Call the adapter - LOG WHAT WE'RE USING
+            # Call the adapter - Log what we're using
             self.logger.info(f"Using provider: {provider_name}, model: {model}")
             response = adapter.generate_text(messages, model=model)
             
@@ -502,3 +536,69 @@ class UIManager:
             ]
         else:
             return []
+    
+    def set_theme(self, theme: UITheme) -> None:
+        """
+        Set the UI theme.
+        
+        Args:
+            theme: Theme to set
+        """
+        self.config_manager.set_config("ui.theme", theme.name.lower())
+        self.logger.debug(f"Set theme to {theme.name}")
+    
+    def set_font_size(self, font_size: int) -> None:
+        """
+        Set the UI font size.
+        
+        Args:
+            font_size: Font size to set
+        """
+        self.config_manager.set_config("ui.font_size", font_size)
+        self.logger.debug(f"Set font size to {font_size}")
+    
+    def toggle_animations(self, enabled: bool) -> None:
+        """
+        Toggle UI animations.
+        
+        Args:
+            enabled: Whether animations are enabled
+        """
+        self.config_manager.set_config("ui.animations_enabled", enabled)
+        self.logger.debug(f"Set animations enabled to {enabled}")
+    
+    def toggle_compact_mode(self, enabled: bool) -> None:
+        """
+        Toggle UI compact mode.
+        
+        Args:
+            enabled: Whether compact mode is enabled
+        """
+        self.config_manager.set_config("ui.compact_mode", enabled)
+        self.logger.debug(f"Set compact mode to {enabled}")
+    
+    def show_notification(self, message: str, duration: int = 3000) -> None:
+        """
+        Show a notification in the UI.
+        
+        Args:
+            message: Notification message
+            duration: Duration in milliseconds
+        """
+        self.event_bus.publish_event("ui.notification", {
+            "message": message,
+            "duration": duration
+        })
+        self.logger.debug(f"Showed notification: {message}")
+    
+    def show_error(self, message: str) -> None:
+        """
+        Show an error message in the UI.
+        
+        Args:
+            message: Error message
+        """
+        self.event_bus.publish_event("ui.error", {
+            "message": message
+        })
+        self.logger.debug(f"Showed error: {message}")
