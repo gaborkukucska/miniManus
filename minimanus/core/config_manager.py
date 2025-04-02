@@ -211,13 +211,21 @@ class ConfigurationManager:
         if path is None:
             return self.config
         
+        # Add debug logging for model configs
+        if "default_model" in path:
+            self.logger.debug(f"Getting config for path: {path}, default: {default}")
+        
         current = self.config
         for key in path.split('.'):
             if isinstance(current, dict) and key in current:
                 current = current[key]
             else:
+                if "default_model" in path:
+                    self.logger.debug(f"Path {path} not found, returning default: {default}")
                 return default
         
+        if "default_model" in path:
+            self.logger.debug(f"Returning config value for {path}: {current}")
         return current
     
     def set_config(self, path: str, value: Any) -> bool:
@@ -233,6 +241,10 @@ class ConfigurationManager:
         """
         if not path:
             return False
+        
+        # Add debug logging for model configs
+        if "default_model" in path:
+            self.logger.info(f"Setting config path: {path} to value: {value}")
         
         keys = path.split('.')
         current = self.config
