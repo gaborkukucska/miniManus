@@ -14,7 +14,7 @@ import logging
 import asyncio
 import json
 import re
-from typing import Dict, List, Optional, Any, Callable, Union
+from typing import Dict, List, Optional, Any, Callable, Union, Tuple # Added Tuple here
 from enum import Enum, auto
 from pathlib import Path
 
