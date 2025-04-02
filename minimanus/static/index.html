@@ -5,44 +5,54 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>miniManus</title>
     <link rel="stylesheet" href="styles.css">
+    <!-- Add Favicon links if you have one -->
+    <!-- <link rel="icon" href="/favicon.ico" sizes="any"> -->
+    <!-- <link rel="apple-touch-icon" href="/apple-touch-icon.png"> -->
 </head>
-<body>
+<body class="dark-theme"> <!-- Default to dark theme class, JS will adjust -->
     <div class="app-container">
         <header>
             <h1>miniManus</h1>
             <nav>
                 <ul>
-                    <li><a href="#" class="active" id="chat-tab">Chat</a></li>
-                    <li><a href="#" id="settings-tab">Settings</a></li>
+                    <!-- Use data attributes for easier JS targeting -->
+                    <li><a href="#" class="active" data-tab="chat" id="chat-tab">Chat</a></li>
+                    <li><a href="#" data-tab="settings" id="settings-tab">Settings</a></li>
+                    <!-- Add more tabs like "Models" or "Plugins" later if needed -->
+                    <!-- <li><a href="#" data-tab="models" id="models-tab">Models</a></li> -->
                 </ul>
             </nav>
         </header>
-        
+
         <main>
             <!-- Chat Interface -->
-            <section id="chat-section" class="active-section">
+            <section id="chat-section" class="section active-section">
                 <div class="chat-container">
                     <div class="chat-messages" id="chat-messages">
+                        <!-- Initial welcome message -->
                         <div class="message assistant-message">
-                            <div class="message-content">Hello! I'm miniManus. How can I help you today?</div>
+                            <div class="message-content">Hello! I'm miniManus. How can I assist you today?</div>
                         </div>
+                        <!-- Messages will be added here dynamically by script.js -->
                     </div>
                     <div class="chat-input">
-                        <textarea id="message-input" placeholder="Type your message here..."></textarea>
-                        <button id="send-button">Send</button>
+                        <textarea id="message-input" placeholder="Type your message..." rows="1"></textarea>
+                        <button id="send-button" title="Send Message (Enter)">Send</button>
                     </div>
                 </div>
             </section>
-            
+
             <!-- Settings Panel -->
             <section id="settings-section" class="section">
                 <h2>Settings</h2>
                 <div class="settings-container">
+                    <!-- API Provider Selection -->
                     <div class="settings-group">
-                        <h3>API Settings</h3>
+                        <h3>Default API Provider</h3>
                         <div class="setting-item">
-                            <label for="default-provider">Default Provider:</label>
+                            <label for="default-provider">Select Provider:</label>
                             <select id="default-provider">
+                                <!-- Options will be populated based on available providers later -->
                                 <option value="openrouter">OpenRouter</option>
                                 <option value="anthropic">Anthropic</option>
                                 <option value="deepseek">DeepSeek</option>
@@ -50,81 +60,129 @@
                                 <option value="litellm">LiteLLM</option>
                             </select>
                         </div>
-                        
-                        <div class="provider-settings" id="openrouter-settings">
-                            <div class="setting-item">
-                                <label for="openrouter-api-key">OpenRouter API Key:</label>
-                                <input type="password" id="openrouter-api-key">
-                            </div>
-                            <div class="setting-item">
-                                <label for="openrouter-model">Default Model:</label>
-                                <select id="openrouter-model">
-                                    <option value="anthropic/claude-3-opus">Claude 3 Opus</option>
-                                    <option value="openai/gpt-4-turbo" selected>GPT-4 Turbo</option>
-                                    <option value="mistralai/mistral-large">Mistral Large</option>
-                                </select>
-                            </div>
+                    </div>
+
+                    <!-- Provider Specific Settings (Initially hidden, shown based on selection) -->
+
+                    <!-- OpenRouter -->
+                    <div class="settings-group provider-settings" id="openrouter-settings">
+                        <h3>OpenRouter Settings</h3>
+                        <div class="setting-item">
+                            <label for="openrouter-api-key">API Key:</label>
+                            <input type="password" id="openrouter-api-key" placeholder="sk-or-v1..." autocomplete="off">
                         </div>
-                        
-                        <div class="provider-settings" id="anthropic-settings" style="display: none;">
-                            <div class="setting-item">
-                                <label for="anthropic-api-key">Anthropic API Key:</label>
-                                <input type="password" id="anthropic-api-key">
-                            </div>
-                            <div class="setting-item">
-                                <label for="anthropic-model">Default Model:</label>
-                                <select id="anthropic-model">
-                                    <option value="claude-3-opus-20240229" selected>Claude 3 Opus</option>
-                                    <option value="claude-3-sonnet-20240229">Claude 3 Sonnet</option>
-                                    <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
-                                </select>
-                            </div>
+                        <div class="setting-item">
+                            <label for="openrouter-model">Default Model:</label>
+                            <select id="openrouter-model">
+                                <option value="" disabled selected>Loading models...</option>
+                                <!-- Static fallbacks (JS will replace with API data) -->
+                                <option value="openai/gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                                <option value="anthropic/claude-3-haiku">Claude 3 Haiku</option>
+                            </select>
                         </div>
-                        
-                        <div class="provider-settings" id="deepseek-settings" style="display: none;">
-                            <div class="setting-item">
-                                <label for="deepseek-api-key">DeepSeek API Key:</label>
-                                <input type="password" id="deepseek-api-key">
-                            </div>
-                            <div class="setting-item">
-                                <label for="deepseek-model">Default Model:</label>
-                                <select id="deepseek-model">
-                                    <option value="deepseek-chat" selected>DeepSeek Chat</option>
-                                    <option value="deepseek-coder">DeepSeek Coder</option>
-                                </select>
-                            </div>
+                        <!-- Add OpenRouter specific headers if needed -->
+                        <div class="setting-item">
+                            <label for="openrouter-referer">HTTP Referer:</label>
+                            <input type="text" id="openrouter-referer" placeholder="https://your-site-url">
                         </div>
-                        
-                        <div class="provider-settings" id="ollama-settings" style="display: none;">
-                            <div class="setting-item">
-                                <label for="ollama-host">Ollama Host:</label>
-                                <input type="text" id="ollama-host" value="http://localhost:11434">
-                            </div>
-                            <div class="setting-item">
-                                <label for="ollama-model">Default Model:</label>
-                                <select id="ollama-model">
-                                    <option value="llama3" selected>Llama 3</option>
-                                    <option value="mistral">Mistral</option>
-                                    <option value="llama2">Llama 2</option>
-                                </select>
-                            </div>
-                        </div>
-                        
-                        <div class="provider-settings" id="litellm-settings" style="display: none;">
-                            <div class="setting-item">
-                                <label for="litellm-host">LiteLLM Host:</label>
-                                <input type="text" id="litellm-host" value="http://localhost:8000">
-                            </div>
-                            <div class="setting-item">
-                                <label for="litellm-model">Default Model:</label>
-                                <select id="litellm-model">
-                                    <option value="gpt-3.5-turbo" selected>GPT-3.5 Turbo</option>
-                                    <option value="gpt-4">GPT-4</option>
-                                </select>
-                            </div>
+                         <div class="setting-item">
+                            <label for="openrouter-x_title">X-Title:</label>
+                            <input type="text" id="openrouter-x_title" placeholder="Your App Name">
                         </div>
                     </div>
-                    
+
+                    <!-- Anthropic -->
+                    <div class="settings-group provider-settings" id="anthropic-settings">
+                        <h3>Anthropic Settings</h3>
+                        <div class="setting-item">
+                            <label for="anthropic-api-key">API Key:</label>
+                            <input type="password" id="anthropic-api-key" placeholder="sk-ant-..." autocomplete="off">
+                        </div>
+                        <div class="setting-item">
+                            <label for="anthropic-model">Default Model:</label>
+                            <select id="anthropic-model">
+                                <option value="" disabled selected>Loading models...</option>
+                                <!-- Static fallbacks (JS will replace with API data) -->
+                                <option value="claude-3-5-sonnet-20240620">Claude 3.5 Sonnet</option>
+                                <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- DeepSeek -->
+                    <div class="settings-group provider-settings" id="deepseek-settings">
+                        <h3>DeepSeek Settings</h3>
+                        <div class="setting-item">
+                            <label for="deepseek-api-key">API Key:</label>
+                            <input type="password" id="deepseek-api-key" placeholder="sk-..." autocomplete="off">
+                        </div>
+                        <div class="setting-item">
+                            <label for="deepseek-model">Default Model:</label>
+                            <select id="deepseek-model">
+                                 <option value="" disabled selected>Loading models...</option>
+                                 <!-- Static fallbacks (JS will replace with API data) -->
+                                <option value="deepseek-chat">DeepSeek Chat</option>
+                                <option value="deepseek-coder">DeepSeek Coder</option>
+                            </select>
+                        </div>
+                         <div class="setting-item">
+                            <label for="deepseek-embedding-model">Embedding Model:</label>
+                            <input type="text" id="deepseek-embedding-model" placeholder="deepseek-embedding">
+                        </div>
+                    </div>
+
+                    <!-- Ollama -->
+                    <div class="settings-group provider-settings" id="ollama-settings">
+                        <h3>Ollama Settings</h3>
+                        <div class="setting-item">
+                            <label for="ollama-base_url">Host URL:</label>
+                            <input type="text" id="ollama-base_url" placeholder="http://localhost:11434">
+                        </div>
+                        <div class="setting-item">
+                            <label for="ollama-model">Default Model:</label>
+                            <select id="ollama-model">
+                                 <option value="" disabled selected>Loading models...</option>
+                                <!-- Static fallbacks (JS will replace with API data) -->
+                                <option value="llama3">Llama 3</option>
+                                <option value="mistral">Mistral</option>
+                            </select>
+                        </div>
+                        <div class="setting-item">
+                             <label for="ollama-discovery_enabled">Enable Discovery:</label>
+                             <input type="checkbox" id="ollama-discovery_enabled" checked>
+                         </div>
+                    </div>
+
+                    <!-- LiteLLM -->
+                    <div class="settings-group provider-settings" id="litellm-settings">
+                        <h3>LiteLLM Settings</h3>
+                        <div class="setting-item">
+                            <label for="litellm-base_url">Host URL:</label>
+                            <input type="text" id="litellm-base_url" placeholder="http://localhost:8000">
+                        </div>
+                         <div class="setting-item">
+                            <label for="litellm-api-key">Master Key (Optional):</label>
+                            <input type="password" id="litellm-api-key" placeholder="Enter if proxy is secured" autocomplete="off">
+                        </div>
+                        <div class="setting-item">
+                            <label for="litellm-model">Default Model:</label>
+                            <select id="litellm-model">
+                                 <option value="" disabled selected>Loading models...</option>
+                                 <!-- Static fallbacks (JS will replace with API data) -->
+                                 <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                            </select>
+                        </div>
+                         <div class="setting-item">
+                            <label for="litellm-embedding-model">Embedding Model:</label>
+                            <input type="text" id="litellm-embedding-model" placeholder="text-embedding-ada-002">
+                        </div>
+                         <div class="setting-item">
+                             <label for="litellm-discovery_enabled">Enable Discovery:</label>
+                             <input type="checkbox" id="litellm-discovery_enabled" checked>
+                         </div>
+                    </div>
+
+                    <!-- UI Settings -->
                     <div class="settings-group">
                         <h3>UI Settings</h3>
                         <div class="setting-item">
@@ -132,30 +190,44 @@
                             <select id="theme">
                                 <option value="system">System Default</option>
                                 <option value="light">Light</option>
-                                <option value="dark" selected>Dark</option>
+                                <option value="dark">Dark</option>
                             </select>
                         </div>
                         <div class="setting-item">
                             <label for="font-size">Font Size:</label>
-                            <input type="range" id="font-size" min="12" max="20" value="14">
-                            <span id="font-size-value">14px</span>
+                            <input type="range" id="font-size" min="10" max="20" value="14" step="1">
+                            <span id="font-size-value" class="setting-value-display">14px</span>
                         </div>
                         <div class="setting-item">
-                            <label for="animations">Animations:</label>
+                            <label for="animations">Enable Animations:</label>
                             <input type="checkbox" id="animations" checked>
                         </div>
+                         <div class="setting-item">
+                            <label for="compact-mode">Compact Mode:</label>
+                            <input type="checkbox" id="compact-mode">
+                        </div>
                     </div>
-                    
-                    <button id="save-settings">Save Settings</button>
+
+                    <!-- Save Button -->
+                    <button id="save-settings">Save All Settings</button>
                 </div>
             </section>
+
+            <!-- Add other sections like Models, Plugins here later -->
+            <!--
+            <section id="models-section" class="section">
+                 <h2>Models</h2>
+                 </div> Model browser/management UI here ... </div>
+            </section>
+            -->
+
         </main>
-        
+
         <footer>
-            <p>miniManus v0.1.0 | Running on Termux</p>
+            <p>miniManus <span id="app-version">v0.1.0</span> | Mobile Agentic Framework</p>
         </footer>
     </div>
-    
+
     <script src="script.js"></script>
 </body>
 </html>
