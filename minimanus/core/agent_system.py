@@ -289,7 +289,7 @@ Your goal is to assist the user effectively while being efficient with resources
         # Get API key and model
         provider_key = default_provider_name.lower()
         api_key = self.config_manager.get_api_key(provider_key)
-        model = self.config_manager.get_config(f"api.providers.{provider_key}.default_model", "")
+        model = self.config_manager.get_config(f"api.{provider_key}.default_model", "")
         
         self.logger.info(f"Using provider: {provider_key}, model: {model}")
         
@@ -387,7 +387,7 @@ Your goal is to assist the user effectively while being efficient with resources
         # Get API key and model
         provider_key = default_provider_name.lower()
         api_key = self.config_manager.get_api_key(provider_key)
-        model = self.config_manager.get_config(f"api.providers.{provider_key}.default_model", "")
+        model = self.config_manager.get_config(f"api.{provider_key}.default_model", "")
         
         self.logger.info(f"Using provider: {provider_key}, model: {model}")
         
@@ -486,7 +486,7 @@ Your goal is to assist the user effectively while being efficient with resources
         # Get API key and model - FIXED PATH HERE
         provider_key = default_provider_name.lower()
         api_key = self.config_manager.get_api_key(provider_key)
-        model = self.config_manager.get_config(f"api.providers.{provider_key}.default_model", "")
+        model = self.config_manager.get_config(f"api.{provider_key}.default_model", "")
         
         self.logger.info(f"Using provider: {provider_key}, model: {model}")
         
