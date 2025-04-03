@@ -49,9 +49,9 @@ except ImportError as e:
         print("ImportError occurred, defining dummy classes for direct test.")
         class DummyEnum: pass
         class APIProvider(DummyEnum): OLLAMA=1
-        class APIRequestType(DummyEnum): CHAT=1
-        class ErrorCategory(DummyEnum): API = 1; NETWORK = 2
-        class ErrorSeverity(DummyEnum): WARNING = 1; ERROR = 2
+        class APIRequestType(DummyEnum): CHAT=1; COMPLETION=2; EMBEDDING=3 # Add necessary types
+        class ErrorCategory(DummyEnum): API = 1; NETWORK = 2; STORAGE = 3; SYSTEM = 4
+        class ErrorSeverity(DummyEnum): WARNING = 1; ERROR = 2; CRITICAL=3
 
         class DummyErrorHandler:
              _instance = None
@@ -101,18 +101,13 @@ except ImportError as e:
 
 logger = logging.getLogger("miniManus.OllamaAdapter")
 
-# --- Rest of the OllamaAdapter class remains the same as provided previously ---
-# (Class definition, __init__, base_url, _get_api_endpoint, discover..., check_availability,
-# get_available_models, _adapt_ollama_model_data, send_chat_request,
-# _adapt_ollama_chat_response, send_completion_request, _adapt_ollama_completion_response,
-# send_embedding_request, _adapt_ollama_embedding_response, send_image_request, send_audio_request)
-
 class OllamaAdapter:
     """
     Adapter for the Ollama API.
 
     Provides asynchronous methods to interact with a local or remote Ollama instance
     for model listing, chat completions, legacy completions, and embeddings.
+    Reads configuration dynamically for flexibility.
     Includes network discovery for local Ollama servers.
     """
 
@@ -123,66 +118,56 @@ class OllamaAdapter:
         self.error_handler = ErrorHandler.get_instance()
         self.config_manager = ConfigurationManager.get_instance()
 
-
-        # API configuration
         self.provider_name = "ollama" # Consistent key for config/secrets
-        # Base URL: Read from config, try discovery if initial connection fails
-        self._base_url = self.config_manager.get_config(
-            f"api.providers.{self.provider_name}.base_url",
-            "http://localhost:11434" # Default Ollama URL (without /api path)
-        )
-        self.timeout = self.config_manager.get_config(
-            f"api.providers.{self.provider_name}.timeout",
-            120 # Default longer timeout for potentially slow local models
-        )
-        self.default_model = self.config_manager.get_config(
-            f"api.providers.{self.provider_name}.default_model",
-            "llama3" # Common default
-        )
 
-        # Available models cache
+        # Store config keys instead of values
+        self._config_key_base_url = f"api.providers.{self.provider_name}.base_url"
+        self._config_key_timeout = f"api.providers.{self.provider_name}.timeout"
+        self._config_key_default_model = f"api.providers.{self.provider_name}.default_model"
+        self._config_key_discovery_enabled = f"api.providers.{self.provider_name}.discovery_enabled"
+        self._config_key_discovery_ports = f"api.providers.{self.provider_name}.discovery_ports"
+        self._config_key_discovery_timeout = f"api.providers.{self.provider_name}.discovery_timeout"
+        self._config_key_discovery_max_hosts = f"api.providers.{self.provider_name}.discovery_max_hosts"
+
+        # Model cache settings
         self.models_cache: Optional[List[Dict[str, Any]]] = None
         self.models_cache_timestamp: float = 0
-        self.models_cache_ttl: int = 120  # 2 minutes (shorter cache for local models)
+        self.models_cache_ttl: int = 120  # 2 minutes cache
 
-        # Network discovery settings
-        self.discovery_enabled = self.config_manager.get_config(
-            f"api.providers.{self.provider_name}.discovery_enabled", True
-        )
-        self.discovery_ports = self.config_manager.get_config(
-            f"api.providers.{self.provider_name}.discovery_ports", [11434]
-        )
-        self.discovery_timeout = self.config_manager.get_config(
-            f"api.providers.{self.provider_name}.discovery_timeout", 1.0 # Discovery timeout
-        )
+        self.logger.info("OllamaAdapter initialized (dynamic config reading)")
 
-        self._discovered_url: Optional[str] = None # Store discovered URL if found
-        self._availability_checked = False # Flag to avoid redundant discovery
+    def _get_current_base_url(self) -> str:
+        """Gets the current base URL from ConfigManager."""
+        return self.config_manager.get_config(self._config_key_base_url, "http://localhost:11434")
 
-        self.logger.info("OllamaAdapter initialized")
+    def _get_current_timeout(self) -> float:
+         """Gets the current timeout from ConfigManager."""
+         return self.config_manager.get_config(self._config_key_timeout, 120)
 
-    @property
-    def base_url(self) -> str:
-         """Returns the currently active base URL (discovered or from config)."""
-         return self._discovered_url or self._base_url
+    def _get_current_default_model(self) -> str:
+         """Gets the current default model from ConfigManager."""
+         return self.config_manager.get_config(self._config_key_default_model, "llama3")
 
     def _get_api_endpoint(self, path: str) -> str:
-         """Constructs the full API endpoint URL."""
-         # Ensure no double slashes and path starts with /api/
-         clean_base = self.base_url.rstrip('/')
-         if not path.startswith('/api/'):
-              path = '/api/' + path.lstrip('/')
-         return f"{clean_base}{path}"
-
+        """Constructs the full API endpoint URL using the current base URL."""
+        current_base_url = self._get_current_base_url() # Get current value
+        clean_base = current_base_url.rstrip('/')
+        if not path.startswith('/api/'):
+            path = '/api/' + path.lstrip('/')
+        return f"{clean_base}{path}"
 
     async def discover_ollama_servers(self) -> List[str]:
         """
         Asynchronously discover Ollama servers on the local network.
-
-        Returns:
-            List of discovered Ollama server base URLs (e.g., http://<ip>:11434).
+        Returns a list of discovered base URLs. Does not automatically update config.
         """
-        if not self.discovery_enabled:
+        # Use config manager to get discovery settings dynamically
+        discovery_enabled = self.config_manager.get_config(self._config_key_discovery_enabled, True)
+        discovery_ports = self.config_manager.get_config(self._config_key_discovery_ports, [11434])
+        discovery_timeout_val = self.config_manager.get_config(self._config_key_discovery_timeout, 1.0)
+        discovery_max_hosts = self.config_manager.get_config(self._config_key_discovery_max_hosts, 20)
+
+        if not discovery_enabled:
             self.logger.info("Ollama discovery disabled by configuration.")
             return []
 
@@ -190,32 +175,29 @@ class OllamaAdapter:
         checked_ips = set()
 
         # --- Check localhost first ---
-        for port in self.discovery_ports:
+        for port in discovery_ports:
             url = f"http://localhost:{port}"
-            checked_ips.add("127.0.0.1") # Mark localhost as checked
+            checked_ips.add("127.0.0.1")
             try:
-                endpoint = f"{url}/api/tags" # Check /api/tags endpoint
+                endpoint = f"{url}/api/tags"
                 async with aiohttp.ClientSession() as session:
-                    # Short timeout for discovery probes
-                    probe_timeout = aiohttp.ClientTimeout(total=self.discovery_timeout)
+                    probe_timeout = aiohttp.ClientTimeout(total=discovery_timeout_val)
                     async with session.get(endpoint, timeout=probe_timeout) as response:
                         if response.status == 200:
                             self.logger.info(f"Discovered local Ollama server at {url}")
                             discovered_servers.append(url)
-                            # Prefer localhost if found, return immediately
+                            # Prefer localhost if found
                             return discovered_servers
             except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
                  self.logger.debug(f"No Ollama server found at {url} (connection/timeout error).")
             except Exception as e:
                  self.logger.debug(f"Error checking {url}: {e}")
-        # --- End localhost check ---
-
 
         # --- Scan local network (if localhost failed) ---
         local_ip = self._get_local_ip()
         if not local_ip:
             self.logger.warning("Could not determine local IP for network scan.")
-            return discovered_servers # Return empty list if local IP fails
+            return discovered_servers
 
         ip_parts = local_ip.split('.')
         if len(ip_parts) != 4:
@@ -223,33 +205,27 @@ class OllamaAdapter:
             return discovered_servers
 
         network_prefix = '.'.join(ip_parts[:3])
-        max_hosts = self.config_manager.get_config(
-            f"api.providers.{self.provider_name}.discovery_max_hosts", 20
-        )
 
-        # Prioritize common IPs and scan others up to max_hosts
-        common_last_octets = [1, 2, 254] # Router/gateway often end in these
-        scan_range = list(range(1, 255)) # Full range initially
+        common_last_octets = [1, 2, 254]
+        scan_range = list(range(1, 255))
         tasks = []
-
-        # Create tasks for scanning
         scanned_count = 0
-        checked_ips.add(local_ip) # Don't scan self
+        checked_ips.add(local_ip)
 
-        # Check common IPs first
+        # Create tasks for common IPs
         for i in common_last_octets:
              ip = f"{network_prefix}.{i}"
              if ip not in checked_ips:
-                 tasks.append(self._probe_ollama_ip(ip, self.discovery_ports))
+                 tasks.append(self._probe_ollama_ip(ip, discovery_ports))
                  checked_ips.add(ip)
                  scanned_count += 1
 
-        # Check remaining IPs up to the limit
+        # Create tasks for remaining IPs up to the limit
         for i in scan_range:
-             if scanned_count >= max_hosts: break
+             if scanned_count >= discovery_max_hosts: break
              ip = f"{network_prefix}.{i}"
              if ip not in checked_ips:
-                 tasks.append(self._probe_ollama_ip(ip, self.discovery_ports))
+                 tasks.append(self._probe_ollama_ip(ip, discovery_ports))
                  checked_ips.add(ip)
                  scanned_count += 1
 
@@ -262,17 +238,24 @@ class OllamaAdapter:
             if url:
                 discovered_servers.append(url)
 
-        self.logger.info(f"Ollama discovery finished. Found {len(discovered_servers)} potential servers.")
+        if discovered_servers:
+            self.logger.info(f"Ollama discovery found servers: {discovered_servers}")
+            # Optionally publish an event
+            # self.event_bus.publish_event("ollama.discovered", {"servers": discovered_servers})
+        else:
+             self.logger.info("Ollama discovery finished. Found no servers on the network.")
+
         return discovered_servers
 
     async def _probe_ollama_ip(self, ip: str, ports: List[int]) -> Optional[str]:
         """Probes a single IP address on given ports for Ollama."""
+        discovery_timeout_val = self.config_manager.get_config(self._config_key_discovery_timeout, 1.0)
         for port in ports:
             url = f"http://{ip}:{port}"
             endpoint = f"{url}/api/tags"
             try:
                 async with aiohttp.ClientSession() as session:
-                    probe_timeout = aiohttp.ClientTimeout(total=self.discovery_timeout)
+                    probe_timeout = aiohttp.ClientTimeout(total=discovery_timeout_val)
                     async with session.get(endpoint, timeout=probe_timeout) as response:
                         if response.status == 200:
                             self.logger.info(f"Discovered Ollama server at {url}")
@@ -283,14 +266,12 @@ class OllamaAdapter:
                  self.logger.debug(f"Error probing {url}: {e}")
         return None # Not found on this IP
 
-
     def _get_local_ip(self) -> Optional[str]:
         """Helper to get the local IP address."""
         s = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.settimeout(0.1)
-            # Doesn't need to be reachable
             s.connect(('10.255.255.255', 1))
             IP = s.getsockname()[0]
             return IP
@@ -302,55 +283,33 @@ class OllamaAdapter:
 
     async def check_availability(self) -> bool:
         """
-        Asynchronously check if the configured or discovered Ollama API is available.
-        Will attempt discovery if the configured URL fails and discovery is enabled.
-
-        Returns:
-            True if available, False otherwise.
+        Asynchronously check if the Ollama API (at the currently configured URL) is available.
+        Does NOT automatically trigger discovery on failure here anymore. Discovery is separate.
         """
-        # Check current base URL first
+        current_base_url = self._get_current_base_url()
+        current_timeout = self._get_current_timeout()
         endpoint = self._get_api_endpoint("tags") # Use /api/tags as health check
+        self.logger.debug(f"Checking Ollama availability at {current_base_url}")
         try:
             async with aiohttp.ClientSession() as session:
-                # Use a shorter timeout for availability check
-                check_timeout = aiohttp.ClientTimeout(total=max(1.0, self.timeout / 10))
+                check_timeout = aiohttp.ClientTimeout(total=max(1.0, current_timeout / 10))
                 async with session.get(endpoint, timeout=check_timeout) as response:
                     if response.status == 200:
-                         self.logger.info(f"Ollama server confirmed available at {self.base_url}")
-                         self._availability_checked = True
+                         self.logger.debug(f"Ollama server confirmed available at {current_base_url}")
                          return True
                     else:
-                         self.logger.warning(f"Ollama check at {self.base_url} failed with status {response.status}.")
+                         self.logger.warning(f"Ollama check at {current_base_url} failed with status {response.status}.")
+                         return False
         except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
-             self.logger.warning(f"Ollama server not reachable at configured URL: {self.base_url}")
+             self.logger.warning(f"Ollama server not reachable at configured URL: {current_base_url}")
+             return False
         except Exception as e:
-             self.logger.error(f"Unexpected error checking Ollama at {self.base_url}: {e}", exc_info=True)
-
-        # If initial check failed and discovery hasn't run yet
-        if self.discovery_enabled and not self._discovered_url and not self._availability_checked:
-            self.logger.info("Configured Ollama URL failed, attempting discovery...")
-            discovered = await self.discover_ollama_servers()
-            self._availability_checked = True # Mark discovery as attempted
-            if discovered:
-                self._discovered_url = discovered[0] # Use the first discovered URL
-                self.logger.info(f"Discovery successful. Using Ollama server at {self.base_url}")
-                # Save the discovered URL to config for persistence
-                self.config_manager.set_config(f"api.providers.{self.provider_name}.base_url", self.base_url)
-                return True
-            else:
-                self.logger.warning("Ollama discovery failed to find any servers.")
-                return False
-        elif self._discovered_url:
-             # If we previously discovered a URL, assume it's still the one to use, but it failed the check.
+             self.logger.error(f"Unexpected error checking Ollama at {current_base_url}: {e}", exc_info=True)
              return False
-        else:
-             # Discovery disabled or already attempted, and configured URL failed.
-             return False
-
 
     async def get_available_models(self) -> List[Dict[str, Any]]:
         """
-        Asynchronously get list of available models from Ollama, using cache.
+        Asynchronously get list of available models from Ollama, using cache and current config.
 
         Returns:
             List of model information dictionaries (adapted format), or empty list on failure.
@@ -363,17 +322,16 @@ class OllamaAdapter:
             # Ensure cache contains adapted data
             if self.models_cache and isinstance(self.models_cache[0], dict) and "provider" in self.models_cache[0]:
                  return self.models_cache
-            else: # If cache contains raw data, adapt it (shouldn't happen ideally)
+            else: # If cache contains raw data, adapt it
                  valid_models = [self._adapt_ollama_model_data(m) for m in self.models_cache if m]
                  return [m for m in valid_models if m]
 
-
-        endpoint = self._get_api_endpoint("tags")
+        endpoint = self._get_api_endpoint("tags") # Uses current URL
+        current_timeout = self._get_current_timeout()
         self.logger.info(f"Fetching available models from {endpoint}...")
         try:
             async with aiohttp.ClientSession() as session:
-                # Use a reasonable timeout for fetching models, might take a moment
-                fetch_timeout = aiohttp.ClientTimeout(total=max(5.0, self.timeout / 4))
+                fetch_timeout = aiohttp.ClientTimeout(total=max(5.0, current_timeout / 4))
                 async with session.get(endpoint, timeout=fetch_timeout) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -412,19 +370,16 @@ class OllamaAdapter:
          if not model_id:
              self.logger.warning(f"Skipping Ollama model due to missing 'name': {ollama_model_data}")
              return None
-         # Simple adaptation, can be enhanced
          return {
              "id": model_id,
-             "name": model_id, # Ollama often uses name as ID (e.g., "llama3:latest")
+             "name": model_id,
              "provider": self.provider_name.upper(),
-             # Add other fields if available or needed (Ollama provides size, modified_at)
              "metadata": ollama_model_data
          }
 
-
     async def send_chat_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Asynchronously send a chat completion request to Ollama (/api/chat).
+        Asynchronously send a chat completion request to Ollama (/api/chat) using current config.
 
         Args:
             request_data: Dictionary containing 'model', 'messages', and optionally 'stream', 'options'.
@@ -432,23 +387,16 @@ class OllamaAdapter:
         Returns:
             Dictionary with the API response (adapted) or an error dictionary.
         """
-        required_fields = ["messages"] # Model is now optional in request_data
+        required_fields = ["messages"]
         if not all(field in request_data for field in required_fields):
             return {"error": f"Missing required fields for Ollama chat request: {required_fields}"}
 
-        # *** MODIFIED PAYLOAD ***
         payload = {
-            # Use model from request_data if provided, otherwise use adapter's default
-            "model": request_data.get("model", self.default_model),
+            "model": request_data.get("model", self._get_current_default_model()),
             "messages": request_data["messages"],
             "stream": request_data.get("stream", False),
-            "options": request_data.get("options", {}) # Pass options dict directly
+            "options": request_data.get("options", {})
         }
-
-        # Ensure model is not empty before sending
-        if not payload["model"]:
-             self.logger.error("Ollama chat request cannot proceed: model name is empty.")
-             return {"error": "Model name is required but was empty."}
 
         # Add common parameters to options if not already present
         if "temperature" not in payload["options"] and request_data.get("temperature") is not None:
@@ -456,28 +404,28 @@ class OllamaAdapter:
         if "top_p" not in payload["options"] and request_data.get("top_p") is not None:
              payload["options"]["top_p"] = request_data["top_p"]
         if "num_predict" not in payload["options"] and request_data.get("max_tokens") is not None:
-             payload["options"]["num_predict"] = request_data["max_tokens"] # Map max_tokens
+             payload["options"]["num_predict"] = request_data["max_tokens"]
+
+        if not payload["model"]:
+             self.logger.error("Ollama chat request cannot proceed: model name is empty.")
+             return {"error": "Model name is required but was empty."}
 
         endpoint = self._get_api_endpoint("chat")
+        current_timeout = self._get_current_timeout()
         try:
             async with aiohttp.ClientSession() as session:
-                # Use the configured adapter timeout
-                req_timeout = aiohttp.ClientTimeout(total=self.timeout)
+                req_timeout = aiohttp.ClientTimeout(total=current_timeout)
                 async with session.post(endpoint, json=payload, timeout=req_timeout) as response:
-                    # Ollama streams responses by default if stream=True, handle that later if needed
-                    # For now, assume stream=False or handle non-streaming response
                     if response.status == 200:
                         ollama_response = await response.json()
-                        # Adapt response to common format
                         return self._adapt_ollama_chat_response(ollama_response)
                     else:
                         error_text = await response.text()
-                        # Log the payload that caused the error for debugging
                         self.logger.error(f"Ollama chat request failed: {response.status} - {error_text}. Payload: {payload}")
                         return {"error": f"API Error ({response.status}): {error_text}"}
 
         except asyncio.TimeoutError:
-            self.logger.error(f"Timeout during {self.provider_name} chat request (timeout={self.timeout}s).")
+            self.logger.error(f"Timeout during {self.provider_name} chat request (timeout={current_timeout}s).")
             self.error_handler.handle_error(asyncio.TimeoutError("Timeout during chat request"), ErrorCategory.API, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_chat_request"})
             return {"error": "Request timed out."}
         except aiohttp.ClientError as e:
@@ -492,13 +440,13 @@ class OllamaAdapter:
     def _adapt_ollama_chat_response(self, ollama_response: Dict[str, Any]) -> Dict[str, Any]:
          """Adapts Ollama's /api/chat non-streaming response to resemble OpenAI's."""
          try:
-             created_time = int(time.time()) # Approximate creation time
+             created_time = int(time.time())
              model_name = ollama_response.get("model", "unknown")
              message_content = ollama_response.get("message", {}).get("content", "")
-             finish_reason = "stop" if ollama_response.get("done", True) else "incomplete" # Simple mapping
+             finish_reason = "stop" if ollama_response.get("done", True) else "incomplete"
 
              adapted = {
-                 "id": f"ollama-{model_name}-{created_time}", # Generate an ID
+                 "id": f"ollama-{model_name}-{created_time}",
                  "object": "chat.completion",
                  "created": created_time,
                  "model": model_name,
@@ -517,17 +465,15 @@ class OllamaAdapter:
                  },
                  "_raw_ollama_response": ollama_response
              }
-             # Filter out usage fields if they are None
              adapted["usage"] = {k: v for k, v in adapted["usage"].items() if v is not None}
              return adapted
          except Exception as e:
              self.logger.error(f"Error adapting Ollama chat response: {e}. Raw: {ollama_response}", exc_info=True)
              return {"error": "Failed to process Ollama response", "_raw_response": ollama_response}
 
-
     async def send_completion_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Asynchronously send a legacy completion request to Ollama (/api/generate).
+        Asynchronously send a legacy completion request to Ollama (/api/generate) using current config.
 
         Args:
             request_data: Dictionary containing 'model', 'prompt', and optionally 'stream', 'options'.
@@ -535,33 +481,33 @@ class OllamaAdapter:
         Returns:
             Dictionary with the API response (adapted) or an error dictionary.
         """
-        required_fields = ["prompt"] # Model is optional
+        required_fields = ["prompt"]
         if not all(field in request_data for field in required_fields):
             return {"error": f"Missing required fields for Ollama completion request: {required_fields}"}
 
         payload = {
-            "model": request_data.get("model", self.default_model), # Use default if needed
+            "model": request_data.get("model", self._get_current_default_model()),
             "prompt": request_data["prompt"],
             "stream": request_data.get("stream", False),
             "options": request_data.get("options", {}),
-            "system": request_data.get("system"), # Pass system prompt if provided
-            "template": request_data.get("template"), # Pass template if provided
-            "context": request_data.get("context") # Pass context if provided
+            "system": request_data.get("system"),
+            "template": request_data.get("template"),
+            "context": request_data.get("context")
         }
-        payload = {k: v for k, v in payload.items() if v is not None} # Clean None values
+        payload = {k: v for k, v in payload.items() if v is not None}
 
         if not payload["model"]:
              self.logger.error("Ollama completion request cannot proceed: model name is empty.")
              return {"error": "Model name is required but was empty."}
 
         endpoint = self._get_api_endpoint("generate")
+        current_timeout = self._get_current_timeout()
         try:
             async with aiohttp.ClientSession() as session:
-                req_timeout = aiohttp.ClientTimeout(total=self.timeout)
+                req_timeout = aiohttp.ClientTimeout(total=current_timeout)
                 async with session.post(endpoint, json=payload, timeout=req_timeout) as response:
                     if response.status == 200:
                         ollama_response = await response.json()
-                        # Adapt response
                         return self._adapt_ollama_completion_response(ollama_response)
                     else:
                         error_text = await response.text()
@@ -569,19 +515,22 @@ class OllamaAdapter:
                         return {"error": f"API Error ({response.status}): {error_text}"}
 
         except asyncio.TimeoutError:
-            self.logger.error(f"Timeout during {self.provider_name} completion request.")
+            self.logger.error(f"Timeout during {self.provider_name} completion request (timeout={current_timeout}s).")
+            self.error_handler.handle_error(asyncio.TimeoutError("Timeout during completion request"), ErrorCategory.API, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_completion_request"})
             return {"error": "Request timed out."}
         except aiohttp.ClientError as e:
              self.logger.error(f"Client error during {self.provider_name} completion request: {e}")
+             self.error_handler.handle_error(e, ErrorCategory.NETWORK, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_completion_request"})
              return {"error": f"Network error: {e}"}
         except Exception as e:
             self.logger.error(f"Unexpected error during {self.provider_name} completion request: {e}", exc_info=True)
+            self.error_handler.handle_error(e, ErrorCategory.API, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_completion_request"})
             return {"error": f"An unexpected error occurred: {e}"}
 
     def _adapt_ollama_completion_response(self, ollama_response: Dict[str, Any]) -> Dict[str, Any]:
          """Adapts Ollama's /api/generate non-streaming response to resemble OpenAI's completion."""
          try:
-             created_time = int(time.time()) # Approximate
+             created_time = int(time.time())
              model_name = ollama_response.get("model", "unknown")
              text_content = ollama_response.get("response", "")
              finish_reason = "stop" if ollama_response.get("done", True) else "incomplete"
@@ -612,7 +561,7 @@ class OllamaAdapter:
 
     async def send_embedding_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Asynchronously send an embedding request to Ollama (/api/embeddings).
+        Asynchronously send an embedding request to Ollama (/api/embeddings) using current config.
 
         Args:
             request_data: Dictionary containing 'model', 'prompt' (the text to embed).
@@ -620,46 +569,47 @@ class OllamaAdapter:
         Returns:
             Dictionary with the API response (adapted) or an error dictionary.
         """
-        required_fields = ["prompt"] # Ollama uses 'prompt' for input text, model is optional
+        required_fields = ["prompt"]
         if "input" in request_data and "prompt" not in request_data:
-             request_data["prompt"] = request_data["input"] # Adapt if 'input' is provided
+             request_data["prompt"] = request_data["input"]
         elif "prompt" not in request_data:
              return {"error": f"Missing required field 'prompt' (or 'input') for Ollama embedding request."}
 
-
         payload = {
-            "model": request_data.get("model", self.default_model), # Use default if needed
+            "model": request_data.get("model", self._get_current_default_model()),
             "prompt": request_data["prompt"],
-            "options": request_data.get("options", {}) # Pass options if provided
+            "options": request_data.get("options", {})
         }
 
         if not payload["model"]:
              self.logger.error("Ollama embedding request cannot proceed: model name is empty.")
              return {"error": "Model name is required but was empty."}
 
-
         endpoint = self._get_api_endpoint("embeddings")
+        current_timeout = self._get_current_timeout()
         try:
             async with aiohttp.ClientSession() as session:
-                req_timeout = aiohttp.ClientTimeout(total=self.timeout)
+                req_timeout = aiohttp.ClientTimeout(total=current_timeout)
                 async with session.post(endpoint, json=payload, timeout=req_timeout) as response:
                     if response.status == 200:
                         ollama_response = await response.json()
-                        # Adapt response
-                        return self._adapt_ollama_embedding_response(ollama_response, payload["model"]) # Pass model name
+                        return self._adapt_ollama_embedding_response(ollama_response, payload["model"])
                     else:
                         error_text = await response.text()
                         self.logger.error(f"Ollama embedding request failed: {response.status} - {error_text}. Payload: {payload}")
                         return {"error": f"API Error ({response.status}): {error_text}"}
 
         except asyncio.TimeoutError:
-            self.logger.error(f"Timeout during {self.provider_name} embedding request.")
+            self.logger.error(f"Timeout during {self.provider_name} embedding request (timeout={current_timeout}s).")
+            self.error_handler.handle_error(asyncio.TimeoutError("Timeout during embedding request"), ErrorCategory.API, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_embedding_request"})
             return {"error": "Request timed out."}
         except aiohttp.ClientError as e:
              self.logger.error(f"Client error during {self.provider_name} embedding request: {e}")
+             self.error_handler.handle_error(e, ErrorCategory.NETWORK, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_embedding_request"})
              return {"error": f"Network error: {e}"}
         except Exception as e:
             self.logger.error(f"Unexpected error during {self.provider_name} embedding request: {e}", exc_info=True)
+            self.error_handler.handle_error(e, ErrorCategory.API, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_embedding_request"})
             return {"error": f"An unexpected error occurred: {e}"}
 
     def _adapt_ollama_embedding_response(self, ollama_response: Dict[str, Any], model_name: str) -> Dict[str, Any]:
@@ -676,9 +626,9 @@ class OllamaAdapter:
                     "embedding": embedding_vector,
                     "index": 0
                 }],
-                "model": model_name, # Ollama response doesn't include model name
-                "usage": { # Ollama response doesn't include usage for embeddings
-                    "prompt_tokens": None, # Or estimate based on input length?
+                "model": model_name,
+                "usage": {
+                    "prompt_tokens": None,
                     "total_tokens": None,
                 },
                  "_raw_ollama_response": ollama_response
@@ -687,7 +637,6 @@ class OllamaAdapter:
         except Exception as e:
              self.logger.error(f"Error adapting Ollama embedding response: {e}. Raw: {ollama_response}", exc_info=True)
              return {"error": "Failed to process Ollama embedding response", "_raw_response": ollama_response}
-
 
     async def send_image_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """Placeholder: Ollama doesn't support image generation via this API."""
@@ -699,65 +648,12 @@ class OllamaAdapter:
         self.logger.warning(f"{self.provider_name} adapter does not support audio processing.")
         return {"error": "Audio processing not supported by Ollama."}
 
-# Example usage (if run directly) - Updated for better standalone execution
+# Example usage (if run directly)
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     print("--- Running Direct Ollama Adapter Test ---")
 
-    # Define dummy classes needed for standalone execution
-    # (Copied from previous response - ensuring they are defined before use)
-    class DummyEnum: pass
-    try: # Handle if APIProvider already exists from failed relative import attempt
-        if APIProvider: pass
-    except NameError:
-        class APIProvider(DummyEnum): OLLAMA=1
-    try: # Handle if ErrorCategory already exists
-        if ErrorCategory: pass
-    except NameError:
-        class ErrorCategory(DummyEnum): API = 1; NETWORK = 2
-    try: # Handle if ErrorSeverity already exists
-        if ErrorSeverity: pass
-    except NameError:
-        class ErrorSeverity(DummyEnum): WARNING = 1; ERROR = 2
-
-    class DummyErrorHandler:
-         _instance = None
-         def handle_error(self, *args, **kwargs): print(f"DUMMY ERROR HANDLED: {args}")
-         @classmethod
-         def get_instance(cls):
-              if cls._instance is None: cls._instance = cls()
-              return cls._instance
-
-    class DummyConfigManager:
-        _instance = None
-        _config = {
-             "api.providers.ollama.base_url": "http://localhost:11434",
-             "api.providers.ollama.timeout": 60,
-             "api.providers.ollama.default_model": "llama3",
-             "api.providers.ollama.discovery_enabled": False,
-             "api.providers.ollama.discovery_ports": [11434],
-             "api.providers.ollama.discovery_max_hosts": 10,
-             "api.providers.ollama.discovery_timeout": 0.5
-         }
-        def get_config(self, key, default=None):
-            val = self._config.get(key, default)
-            return val
-        def get_api_key(self, provider): return None
-        def set_config(self, key, value): self._config[key] = value
-        @classmethod
-        def get_instance(cls):
-             if cls._instance is None: cls._instance = cls()
-             return cls._instance
-
-    class DummyEventBus:
-         _instance = None
-         def publish_event(self, *args, **kwargs): pass
-         def startup(self): pass
-         def shutdown(self): pass
-         @classmethod
-         def get_instance(cls):
-              if cls._instance is None: cls._instance = cls()
-              return cls._instance
+    # Dummies are defined at the top if imports failed
 
     # Ensure singletons are replaced ONLY if they weren't imported correctly
     if 'ConfigurationManager' not in globals() or not hasattr(ConfigurationManager, 'get_instance'):
@@ -774,9 +670,10 @@ if __name__ == "__main__":
     adapter = OllamaAdapter()
 
     async def test_ollama_adapter_direct():
-        print(f"Adapter Base URL: {adapter.base_url}")
-        print(f"Adapter Default Model: {adapter.default_model}")
-
+        # Get config dynamically
+        print(f"Adapter Config Base URL: {adapter._get_current_base_url()}")
+        print(f"Adapter Config Default Model: {adapter._get_current_default_model()}")
+        print(f"Adapter Config Timeout: {adapter._get_current_timeout()}")
 
         print("\n--- Checking Availability ---")
         try:
@@ -784,30 +681,29 @@ if __name__ == "__main__":
             print(f"Ollama Available via Adapter: {is_available}")
         except Exception as e:
             print(f"Error during check_availability: {e}")
-            is_available = False # Assume not available if check fails
+            is_available = False
 
         if is_available:
             print("\n--- Getting Available Models ---")
-            models = [] # Initialize
+            models = []
             try:
                 models = await adapter.get_available_models()
                 print(f"Adapter found {len(models)} models.")
                 if models:
                     print("Models (Adapted Format):")
-                    for m in models[:min(len(models), 5)]: # Print first few
+                    for m in models[:min(len(models), 5)]:
                         print(f"  - ID: {m.get('id')}, Name: {m.get('name')}, Provider: {m.get('provider')}, Metadata: {m.get('metadata')}")
                 else:
                     print("No models retrieved by adapter.")
             except Exception as e:
                  print(f"Error during get_available_models: {e}")
 
-            # --- Test Chat Request ---
             print("\n--- Testing Chat Request ---")
             if models:
-                chat_model_to_use = models[0]['id'] # Use the first discovered model
+                chat_model_to_use = models[0]['id']
                 print(f"Using model: {chat_model_to_use}")
                 chat_data = {
-                    "model": chat_model_to_use, # Explicitly provide model
+                    "model": chat_model_to_use,
                     "messages": [{"role": "user", "content": "Why is the sky blue?"}]
                 }
                 try:
@@ -817,7 +713,19 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"Error during send_chat_request: {e}")
             else:
-                print("Skipping chat test - no models available.")
+                 # Try with default model if no models were listed
+                 print(f"No models listed, trying default: {adapter._get_current_default_model()}")
+                 chat_data = {
+                    # "model": adapter._get_current_default_model(), # Let send_chat_request use default
+                    "messages": [{"role": "user", "content": "Why is the sky blue?"}]
+                 }
+                 try:
+                    chat_response = await adapter.send_chat_request(chat_data)
+                    print("Chat Response (Adapted, using default model):")
+                    print(json.dumps(chat_response, indent=2))
+                 except Exception as e:
+                    print(f"Error during send_chat_request (using default): {e}")
+
 
         else:
             print("Skipping further tests as adapter check failed or returned False.")
