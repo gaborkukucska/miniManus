@@ -1,6 +1,7 @@
 // miniManus-main/minimanus/static/script.js
 
 document.addEventListener('DOMContentLoaded', () => {
+    // --- DOM Elements ---
     const chatMessages = document.getElementById('chat-messages');
     const messageInput = document.getElementById('message-input');
     const sendButton = document.getElementById('send-button');
@@ -8,6 +9,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const chatSection = document.getElementById('chat-section');
     const settingsTab = document.getElementById('settings-tab');
     const chatTab = document.getElementById('chat-tab');
+    // Settings Elements
     const themeSelect = document.getElementById('theme');
     const fontSizeSlider = document.getElementById('font-size');
     const fontSizeValue = document.getElementById('font-size-value');
@@ -15,9 +17,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const compactModeCheckbox = document.getElementById('compact-mode');
     const saveSettingsButton = document.getElementById('save-settings');
     const defaultProviderSelect = document.getElementById('default-provider');
-    const providerSettingsDivs = document.querySelectorAll('.provider-settings'); // Select all provider setting divs
+    const providerSettingsDivs = document.querySelectorAll('.provider-settings');
+    // Add a placeholder for session list and current session info if needed later
+    // const sessionList = document.getElementById('session-list');
+    // const currentSessionInfo = document.getElementById('current-session-info');
 
-    let currentSessionId = null; // Store the current session ID
+    // --- State Variables ---
+    let currentSessionId = null;
+    let currentSessionModel = null; // Track the model selected for the current session
 
     // --- Utility Functions ---
 
@@ -27,38 +34,49 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const contentDiv = document.createElement('div');
         contentDiv.classList.add('message-content');
-        // Basic sanitization (replace with a more robust library if needed)
-        contentDiv.textContent = content; // Use textContent to prevent HTML injection
+        // Basic sanitization (use textContent for safety)
+        contentDiv.textContent = content;
 
         messageDiv.appendChild(contentDiv);
         chatMessages.appendChild(messageDiv);
-        chatMessages.scrollTop = chatMessages.scrollHeight; // Auto-scroll
+        // Only scroll if the user is already near the bottom
+        const scrollThreshold = 50; // Pixels from bottom
+        const isScrolledNearBottom = chatMessages.scrollHeight - chatMessages.clientHeight <= chatMessages.scrollTop + scrollThreshold;
+        if (isScrolledNearBottom) {
+             chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
     }
 
     function setLoadingState(isLoading) {
         sendButton.disabled = isLoading;
         messageInput.disabled = isLoading;
-        if (isLoading) {
-            sendButton.textContent = '...';
-        } else {
-            sendButton.textContent = 'Send';
-        }
+        sendButton.textContent = isLoading ? '...' : 'Send';
     }
 
     function adjustTextareaHeight() {
         messageInput.style.height = 'auto'; // Reset height
-        messageInput.style.height = (messageInput.scrollHeight > 120 ? 120 : messageInput.scrollHeight) + 'px';
+        const scrollHeight = messageInput.scrollHeight;
+        const maxHeight = 120;
+        messageInput.style.height = (scrollHeight > maxHeight ? maxHeight : scrollHeight) + 'px';
     }
 
     // --- API Calls ---
 
-    async function sendMessageToServer(message, sessionId) {
+    async function sendMessageToServer(message, sessionId, modelId) {
         setLoadingState(true);
         try {
             const payload = { message: message };
+            // Include session_id if available (backend will use current if null)
             if (sessionId) {
                 payload.session_id = sessionId;
             }
+            // Note: Backend's process_message now reads model from the session object
+            // We don't need to send modelId here anymore unless we want to override the session's model
+            // if (modelId) {
+            //    payload.model_id = modelId; // Or maybe just 'model'? Check backend API handler if needed
+            // }
+            console.log("Sending message payload:", payload); // Log payload
+
             const response = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -105,20 +123,22 @@ document.addEventListener('DOMContentLoaded', () => {
             compactModeCheckbox.checked = settings.ui?.compact_mode ?? false;
 
             // --- Populate API Settings ---
-            defaultProviderSelect.value = settings.api?.default_provider || 'openrouter';
-            toggleProviderSettingsVisibility(defaultProviderSelect.value); // Show correct section
+            const savedDefaultProvider = settings.api?.default_provider || 'openrouter';
+            defaultProviderSelect.value = savedDefaultProvider;
+            toggleProviderSettingsVisibility(savedDefaultProvider); // Show correct section
 
             // --- Populate Provider Specific Settings ---
             const providers = ['openrouter', 'anthropic', 'deepseek', 'ollama', 'litellm'];
-            const modelFetchPromises = []; // Store promises for fetching models
+            const modelFetchPromises = [];
 
             providers.forEach(provider => {
                 const providerConfig = settings.api?.providers?.[provider] || {};
+                const providerPrefix = `api.providers.${provider}`;
 
-                // API Key (don't load value, just check presence if needed)
+                // API Key (Clear password fields on load)
                 const apiKeyInput = document.getElementById(`${provider}-api-key`);
                 if (apiKeyInput) {
-                     apiKeyInput.value = ''; // Clear password fields on load for security
+                     apiKeyInput.value = '';
                      apiKeyInput.placeholder = `Enter ${provider} key...`;
                 }
 
@@ -128,10 +148,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     baseUrlInput.value = providerConfig.base_url || '';
                 }
 
-                // Default Model (Load options later)
+                // Default Model Select (Store saved value, load options async)
                 const modelSelect = document.getElementById(`${provider}-model`);
                 if (modelSelect) {
-                    modelSelect.dataset.savedValue = providerConfig.default_model || ''; // Store saved value
+                    modelSelect.dataset.savedValue = providerConfig.default_model || ''; // Store for later selection
+                    modelFetchPromises.push(loadModelsForProvider(provider, modelSelect));
                 }
 
                 // Embedding Model
@@ -151,16 +172,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     document.getElementById('openrouter-referer').value = providerConfig.referer || '';
                     document.getElementById('openrouter-x_title').value = providerConfig.x_title || '';
                 }
-
-                // Fetch models for this provider
-                if(modelSelect){
-                    modelFetchPromises.push(loadModelsForProvider(provider, modelSelect, providerConfig.default_model));
-                }
             });
 
-            // Wait for all model fetches to complete
             await Promise.allSettled(modelFetchPromises);
             console.log("Finished fetching models for all providers.");
+
+            // Load sessions to get the current session ID
+            await loadSessions();
 
         } catch (error) {
             console.error('Error loading settings:', error);
@@ -168,8 +186,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-     async function loadModelsForProvider(provider, selectElement, savedModelId) {
+    async function loadModelsForProvider(provider, selectElement) {
         console.log(`Fetching models for ${provider}...`);
+        const savedModelId = selectElement.dataset.savedValue || ''; // Get the saved value
         try {
             const response = await fetch(`/api/models?provider=${provider}`);
             if (!response.ok) {
@@ -178,7 +197,6 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
             const models = data.models || [];
 
-            // Clear existing options except the placeholder
             selectElement.innerHTML = '<option value="" disabled>Select a model</option>';
 
             if (models.length === 0) {
@@ -187,27 +205,30 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            // Populate options
+            models.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id)); // Sort alphabetically
+
             models.forEach(model => {
                 const option = document.createElement('option');
-                option.value = model.id; // Use the unique model ID
-                // Use name if available, otherwise fallback to id
+                option.value = model.id;
                 option.textContent = model.name ? `${model.name} (${model.id})` : model.id;
+                // Add context length if available
+                if (model.context_length) {
+                     option.textContent += ` [${(model.context_length / 1000).toFixed(0)}k]`;
+                }
                 selectElement.appendChild(option);
             });
 
-            // Set the selected value based on saved config or adapter's default
+            // Try to set the selected value based on saved config
             if (savedModelId && selectElement.querySelector(`option[value="${savedModelId}"]`)) {
                  selectElement.value = savedModelId;
             } else if (models.length > 0) {
-                 // If saved value is invalid or missing, select the first available model
+                 // If saved value is invalid/missing, select first available
                  selectElement.value = models[0].id;
                  console.log(`Default model for ${provider} ('${savedModelId}') not found or invalid, selecting first available: ${models[0].id}`);
             } else {
                  selectElement.value = ""; // No models available
             }
             console.log(`Models loaded for ${provider}. Selected: ${selectElement.value}`);
-
 
         } catch (error) {
             console.error(`Error fetching models for ${provider}:`, error);
@@ -228,8 +249,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (response.ok && result.status === 'success') {
                 alert('Settings saved successfully!');
-                // Optionally reload or provide feedback
-                loadSettings(); // Reload settings after saving to reflect changes
+                loadSettings(); // Reload settings to reflect potential changes and ensure consistency
             } else {
                 console.error("Save settings failed:", result);
                 alert(`Error saving settings: ${result.message || 'Unknown error'}`);
@@ -247,8 +267,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const result = await response.json();
             if (response.ok && result.status === 'success') {
                  alert(`Model discovery finished! ${result.message || ''} Reloading model lists.`);
-                 // Trigger a reload of models in the dropdowns
-                 loadSettings(); // Reload settings will re-fetch models
+                 // Reload settings will re-fetch models and update dropdowns
+                 loadSettings();
             } else {
                 console.error("Discover models failed:", result);
                 alert(`Error during model discovery: ${result.message || 'Unknown error'}`);
@@ -256,6 +276,22 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             console.error('Error triggering model discovery:', error);
             alert(`Failed to trigger model discovery: ${error.message}`);
+        }
+    }
+
+    async function loadSessions() {
+        console.log("Loading session info...");
+        try {
+            const response = await fetch('/api/sessions');
+            if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+            const data = await response.json();
+            currentSessionId = data.current_session_id;
+            console.log("Current session ID:", currentSessionId);
+            // TODO: Populate session list UI if needed
+            // TODO: Load messages for the current session
+        } catch (error) {
+            console.error("Failed to load sessions:", error);
+            // Handle error, maybe create a new session?
         }
     }
 
@@ -268,46 +304,26 @@ document.addEventListener('DOMContentLoaded', () => {
             document.body.classList.add('light-theme');
         } else if (themeValue === 'dark') {
             document.body.classList.add('dark-theme');
-        } else {
-            // Handle 'system' theme - check preference
-            if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-                document.body.classList.add('dark-theme');
-            } else {
-                // Default to light if system preference is light or unknown
-                 document.body.classList.remove('dark-theme'); // Ensure dark is removed if switching from dark default
-                 document.body.classList.add('light-theme'); // Or just remove dark and rely on base CSS
-            }
+        } else { // System theme
+            const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            document.body.classList.toggle('dark-theme', prefersDark);
+            document.body.classList.toggle('light-theme', !prefersDark); // Apply light if not dark
         }
     }
 
     function toggleProviderSettingsVisibility(selectedProvider) {
         providerSettingsDivs.forEach(div => {
-            if (div.id === `${selectedProvider}-settings`) {
-                div.style.display = 'block';
-            } else {
-                div.style.display = 'none';
-            }
+            div.style.display = div.id === `${selectedProvider}-settings` ? 'block' : 'none';
         });
     }
 
     function switchTab(targetTab) {
-        // Hide all sections
-        document.querySelectorAll('main .section').forEach(section => {
-            section.classList.remove('active-section');
-        });
-        // Deactivate all tabs
-        document.querySelectorAll('header nav ul li a').forEach(tab => {
-            tab.classList.remove('active');
-        });
-
-        // Show target section
+        document.querySelectorAll('main .section').forEach(section => section.classList.remove('active-section'));
+        document.querySelectorAll('header nav ul li a').forEach(tab => tab.classList.remove('active'));
         document.getElementById(`${targetTab}-section`).classList.add('active-section');
-        // Activate target tab
         document.querySelector(`a[data-tab='${targetTab}']`).classList.add('active');
-
-        // Reload settings if switching to settings tab
         if (targetTab === 'settings') {
-            loadSettings();
+            loadSettings(); // Reload settings each time the tab is viewed
         }
     }
 
@@ -317,15 +333,16 @@ document.addEventListener('DOMContentLoaded', () => {
         const messageText = messageInput.value.trim();
         if (messageText) {
             addMessage('user', messageText);
+            // Send using currentSessionId (which might be null initially, backend handles it)
             sendMessageToServer(messageText, currentSessionId);
             messageInput.value = '';
-            adjustTextareaHeight(); // Reset height after sending
+            adjustTextareaHeight();
         }
     });
 
     messageInput.addEventListener('keypress', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault(); // Prevent newline
+            e.preventDefault();
             sendButton.click();
         }
     });
@@ -336,21 +353,21 @@ document.addEventListener('DOMContentLoaded', () => {
     chatTab.addEventListener('click', (e) => { e.preventDefault(); switchTab('chat'); });
     settingsTab.addEventListener('click', (e) => { e.preventDefault(); switchTab('settings'); });
 
-    // Settings changes
+    // Settings changes listeners
     themeSelect.addEventListener('change', () => applyTheme(themeSelect.value));
     fontSizeSlider.addEventListener('input', () => {
         const size = fontSizeSlider.value;
         fontSizeValue.textContent = `${size}px`;
         document.body.style.setProperty('--font-size', `${size}px`);
     });
-
     defaultProviderSelect.addEventListener('change', () => {
         toggleProviderSettingsVisibility(defaultProviderSelect.value);
     });
 
+    // Save Settings Button
     saveSettingsButton.addEventListener('click', async () => {
         const settingsToSave = {};
-        const apiKeyFields = {}; // Keep API keys separate for potential backend handling
+        const apiKeyFields = {}; // Separate API keys
 
         // --- Collect General UI Settings ---
         settingsToSave['api.default_provider'] = document.getElementById('default-provider').value;
@@ -359,28 +376,22 @@ document.addEventListener('DOMContentLoaded', () => {
         settingsToSave['ui.animations_enabled'] = document.getElementById('animations').checked;
         settingsToSave['ui.compact_mode'] = document.getElementById('compact-mode').checked;
 
-
         // --- Collect Provider Specific Settings ---
         const providers = ['openrouter', 'anthropic', 'deepseek', 'ollama', 'litellm'];
         providers.forEach(provider => {
             const providerConfigPrefix = `api.providers.${provider}`;
 
-            // API Key (sent separately for potential secret handling)
+            // API Key (use distinct key for backend identification)
             const apiKeyInput = document.getElementById(`${provider}-api-key`);
             if (apiKeyInput) {
-                // Send the key under a distinct name if non-empty, otherwise backend should handle removal
-                if (apiKeyInput.value) {
-                     apiKeyFields[`${provider}-api-key`] = apiKeyInput.value;
-                 } else {
-                      // Send empty value to signal potential removal on backend
-                      apiKeyFields[`${provider}-api-key`] = "";
-                 }
+                 // Send even if empty, backend handles removal/update logic
+                apiKeyFields[`${provider}-api-key`] = apiKeyInput.value;
             }
 
             // Base URL / Host URL
             const baseUrlInput = document.getElementById(`${provider}-base_url`);
             if (baseUrlInput) {
-                settingsToSave[`${providerConfigPrefix}.base_url`] = baseUrlInput.value;
+                settingsToSave[`${providerConfigPrefix}.base_url`] = baseUrlInput.value.trim(); // Trim whitespace
             }
 
             // Default Model
@@ -392,7 +403,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Embedding Model
             const embeddingModelInput = document.getElementById(`${provider}-embedding-model`);
             if (embeddingModelInput) {
-                settingsToSave[`${providerConfigPrefix}.embedding_model`] = embeddingModelInput.value;
+                settingsToSave[`${providerConfigPrefix}.embedding_model`] = embeddingModelInput.value.trim();
             }
 
             // Discovery Enabled
@@ -401,35 +412,35 @@ document.addEventListener('DOMContentLoaded', () => {
                 settingsToSave[`${providerConfigPrefix}.discovery_enabled`] = discoveryEnabledCheckbox.checked;
             }
 
-             // Discovery Ports (Handle potential future UI for this)
-             // const discoveryPortsInput = document.getElementById(`${provider}-discovery_ports`);
-             // if (discoveryPortsInput) {
-             //     try {
-             //        // Assume comma-separated list of numbers
-             //        const ports = discoveryPortsInput.value.split(',').map(p => parseInt(p.trim())).filter(p => !isNaN(p));
-             //        settingsToSave[`${providerConfigPrefix}.discovery_ports`] = ports;
-             //     } catch (e) { console.error("Invalid format for discovery ports for", provider); }
-             // }
-
             // OpenRouter Specific Headers
             if (provider === 'openrouter') {
-                settingsToSave[`${providerConfigPrefix}.referer`] = document.getElementById('openrouter-referer').value;
-                settingsToSave[`${providerConfigPrefix}.x_title`] = document.getElementById('openrouter-x_title').value;
+                settingsToSave[`${providerConfigPrefix}.referer`] = document.getElementById('openrouter-referer').value.trim();
+                settingsToSave[`${providerConfigPrefix}.x_title`] = document.getElementById('openrouter-x_title').value.trim();
             }
         });
 
-        // Combine API keys with regular settings for the single POST request
         const combinedPayload = { ...settingsToSave, ...apiKeyFields };
-
-        // *** LOGGING FOR DEBUGGING ***
         console.log("Settings Payload being sent:", JSON.stringify(combinedPayload, null, 2));
-
-        // Call the save function
         await saveSettings(combinedPayload);
     });
 
+    // Add listener for a hypothetical discover models button
+    const discoverButton = document.getElementById('discover-models-button'); // Assuming you add this button
+    if (discoverButton) {
+        discoverButton.addEventListener('click', discoverModels);
+    }
+
 
     // --- Initial Load ---
-    loadSettings(); // Load settings when the page loads
+    loadSettings(); // Load settings and models on page load
     adjustTextareaHeight(); // Initial adjustment for textarea
+
+    // Add listener for system theme changes
+    const darkThemeMq = window.matchMedia("(prefers-color-scheme: dark)");
+    darkThemeMq.addEventListener("change", (e) => {
+        if (themeSelect.value === 'system') {
+            applyTheme('system'); // Re-apply system theme logic
+        }
+    });
+
 });
