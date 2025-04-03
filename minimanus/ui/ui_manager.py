@@ -1,3 +1,4 @@
+# START OF FILE miniManus-main/minimanus/ui/ui_manager.py
 import os
 import sys
 import json
@@ -9,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 from enum import Enum, auto
 from pathlib import Path
-from typing import Dict, List, Optional, Any # Correct import added previously
+from typing import Dict, List, Optional, Any, Tuple # Added Tuple
 
 # Import local modules
 try:
@@ -75,6 +76,7 @@ class UIManager:
         # Web server configuration
         self.host = self.config_manager.get_config("ui.host", "localhost")
         self.port = self.config_manager.get_config("ui.port", 8080)
+        self.request_timeout = 120 # Timeout for waiting for async results (seconds)
 
         # Static file directory (use default, can be overridden)
         self.static_dir = str(STATIC_DIR_DEFAULT)
@@ -144,7 +146,6 @@ class UIManager:
 
         class CustomHandler(BaseHTTPRequestHandler):
             # --- Request Handler Class ---
-            # Needs access to the UIManager instance to interact with other components
             def __init__(self, *args, **kwargs):
                 self.ui_manager = ui_manager_instance
                 # Get component instances needed by handlers
@@ -161,21 +162,15 @@ class UIManager:
 
             def send_json_response(self, status_code: int, data: Dict[str, Any]):
                 """Helper to send JSON responses."""
-                # Add a check if headers are already sent (less likely with http.server but good practice)
-                # if self.headers_sent:
-                #     self.logger.warning("Attempted to send JSON response after headers were sent.")
-                #     return
                 try:
                     self.send_response(status_code)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
                     self.wfile.write(json.dumps(data).encode("utf-8"))
                 except (BrokenPipeError, ConnectionResetError, OSError) as sock_err:
-                     # Catch common errors when client disconnects during response sending
                      self.logger.warning(f"Socket error sending JSON response (client disconnected?): {sock_err}")
                 except Exception as e:
                      self.logger.error(f"Unexpected error sending JSON response: {e}", exc_info=True)
-
 
             def send_error_response(self, status_code: int, message: str, error_details: Optional[str] = None):
                 """Helper to send JSON error responses."""
@@ -183,6 +178,25 @@ class UIManager:
                 if error_details:
                     error_data["details"] = error_details
                 self.send_json_response(status_code, error_data)
+
+            def run_async_task(self, coro) -> Tuple[Optional[Any], Optional[Exception]]:
+                """Runs a coroutine in the main event loop and waits for the result."""
+                loop = self.ui_manager.get_event_loop()
+                if not loop or not loop.is_running():
+                    self.logger.error("Event loop not available for async task.")
+                    return None, RuntimeError("Event loop unavailable")
+
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+                try:
+                    # Wait for the result with a timeout
+                    result = future.result(timeout=self.ui_manager.request_timeout)
+                    return result, None
+                except asyncio.TimeoutError as e:
+                    self.logger.error(f"Timeout waiting for async task result ({self.ui_manager.request_timeout}s). Task: {coro.__name__}")
+                    return None, e
+                except Exception as e:
+                    self.logger.error(f"Exception during async task execution: {e}. Task: {coro.__name__}", exc_info=True)
+                    return None, e
 
             # --- GET Handlers ---
             def do_GET(self):
@@ -192,8 +206,17 @@ class UIManager:
                     path = parsed_url.path
 
                     if path.startswith("/api/"):
-                        self._handle_api_get(path, parsed_url)
+                        # Route API GET requests
+                        if path == "/api/settings":
+                            self._handle_get_settings()
+                        elif path == "/api/models":
+                            self._handle_get_models(parsed_url)
+                        elif path == "/api/sessions":
+                            self._handle_get_sessions()
+                        else:
+                            self.send_error_response(404, "API endpoint not found")
                     else:
+                        # Serve static files
                         self._serve_static_file(path)
 
                 except (BrokenPipeError, ConnectionResetError) as client_err:
@@ -201,32 +224,18 @@ class UIManager:
                 except Exception as e:
                     self.logger.error(f"GET request error for {self.path}: {e}", exc_info=True)
                     self.error_handler.handle_error(e, ErrorCategory.UI, ErrorSeverity.ERROR, {"path": self.path, "method": "GET"})
-                    # Avoid sending error if headers might already be broken
-                    # self.send_error_response(500, "Internal Server Error", str(e))
+                    try:
+                        # Only send error if headers haven't been sent (unlikely here but good practice)
+                        if not getattr(self, 'headers_sent', False):
+                             self.send_error_response(500, "Internal Server Error", str(e))
+                    except Exception:
+                         self.logger.error(f"Failed to send error response for GET {self.path}")
 
-            def _handle_api_get(self, path: str, parsed_url):
-                """Route GET API requests."""
-                loop = self.ui_manager.get_event_loop() # Get the main loop
-                if not loop or not loop.is_running():
-                    self.logger.error("Event loop not available for async GET handler.")
-                    self.send_error_response(500, "Internal server error: Event loop unavailable")
-                    return
-
-                if path == "/api/settings":
-                    self._handle_get_settings()
-                elif path == "/api/models":
-                    # Run async handler in the main loop
-                    asyncio.run_coroutine_threadsafe(self._handle_get_models(parsed_url), loop)
-                elif path == "/api/sessions":
-                    self._handle_get_sessions()
-                else:
-                    self.send_error_response(404, "API endpoint not found")
 
             def _handle_get_settings(self):
-                """Handle GET /api/settings."""
+                """Handle GET /api/settings (Synchronous)."""
                 try:
                     settings = self.config_manager.get_config()
-                    # Exclude sensitive data if secrets were mistakenly loaded into main config
                     if 'secrets' in settings: del settings['secrets']
                     if 'api_keys' in settings.get('api', {}): del settings['api']['api_keys']
                     self.send_json_response(200, settings)
@@ -234,71 +243,47 @@ class UIManager:
                     self.logger.error(f"Error getting settings: {e}", exc_info=True)
                     self.send_error_response(500, "Failed to retrieve settings", str(e))
 
-            # --- Updated _handle_get_models with robust error handling ---
-            async def _handle_get_models(self, parsed_url):
-                """Handle GET /api/models (async)."""
-                # Added outer try block for overall safety
-                try:
-                    query = parse_qs(parsed_url.query)
-                    provider_name = query.get("provider", [None])[0]
-                    models_info = []
-                    models_dict = [] # Initialize models_dict
+            def _handle_get_models(self, parsed_url):
+                """Handle GET /api/models (Runs async task and waits)."""
+                query = parse_qs(parsed_url.query)
+                provider_name = query.get("provider", [None])[0]
 
-                    # Log entry
-                    self.logger.debug(f"Handling GET /api/models?provider={provider_name}")
+                # Define the async function to call
+                async def get_models_async():
+                    if not provider_name:
+                        models_info = await self.model_selection_interface.get_all_models()
+                    else:
+                        try:
+                            provider_enum = APIProvider[provider_name.upper()]
+                            models_info = await self.model_selection_interface.get_models_by_provider(provider_enum)
+                        except KeyError:
+                            # Raise specific error for invalid provider
+                            raise ValueError(f"Invalid provider name: {provider_name}")
+                        except Exception as e:
+                             # Re-raise other exceptions from model fetching
+                             raise RuntimeError(f"Failed to retrieve models for {provider_name}") from e
+                    return [m.to_dict() for m in models_info]
 
-                    # Inner try block for the async operation
-                    try:
-                        if not provider_name:
-                            models_info = await self.model_selection_interface.get_all_models()
-                        else:
-                            try:
-                                provider_enum = APIProvider[provider_name.upper()]
-                                models_info = await self.model_selection_interface.get_models_by_provider(provider_enum)
-                            except KeyError:
-                                # Send error response within the async context if possible
-                                self.send_error_response(400, f"Invalid provider name: {provider_name}")
-                                return # Exit async function
-                            # Catch potential errors during model fetching itself
-                            except Exception as model_fetch_error:
-                                self.logger.error(f"Error getting models for provider {provider_name}: {model_fetch_error}", exc_info=True)
-                                self.send_error_response(500, f"Failed to retrieve models for {provider_name}", str(model_fetch_error))
-                                return # Exit async function
+                # Run the async task and wait for result
+                result, error = self.run_async_task(get_models_async())
 
-                        # Convert to dict *after* successful fetch
-                        models_dict = [m.to_dict() for m in models_info]
-                        self.logger.debug(f"Successfully fetched {len(models_dict)} models for provider '{provider_name or 'all'}'.")
-
-                    except Exception as e:
-                        # Catch errors from await calls or model processing
-                        self.logger.error(f"Async error handling GET /api/models internal logic: {e}", exc_info=True)
-                        self.send_error_response(500, "Internal server error processing models request.", str(e))
-                        return # Exit async function
-
-                    # Try sending the response, catching socket errors
-                    try:
-                         self.send_json_response(200, {"models": models_dict})
-                         self.logger.debug(f"Sent model list response for provider '{provider_name or 'all'}'.")
-                    except OSError as ose:
-                         if ose.errno == 9: # Bad file descriptor
-                             self.logger.warning(f"Socket closed before sending response for GET /api/models (OSError 9). Request likely interrupted.")
-                         else:
-                             self.logger.error(f"OSError sending response for GET /api/models: {ose}", exc_info=True)
-                             # Avoid sending another error if socket is already broken
-                    except Exception as send_e:
-                         self.logger.error(f"Exception sending response for GET /api/models: {send_e}", exc_info=True)
-                         # Avoid sending another error if socket is already broken
-
-                except Exception as outer_e:
-                    # Catch any unexpected error in the overall handler logic
-                    self.logger.error(f"Unexpected outer error in _handle_get_models: {outer_e}", exc_info=True)
-                    # Avoid sending response here if inner sending failed or socket is broken
-
-            # --- End of Updated _handle_get_models ---
+                # Handle result or error
+                if error:
+                    if isinstance(error, ValueError): # Invalid provider
+                        self.send_error_response(400, str(error))
+                    elif isinstance(error, asyncio.TimeoutError):
+                        self.send_error_response(504, "Request timed out while fetching models.")
+                    else: # Other internal errors
+                        self.send_error_response(500, "Internal server error processing models request.", str(error))
+                elif result is not None:
+                    self.send_json_response(200, {"models": result})
+                else:
+                    # Should not happen if error is None, but handle defensively
+                     self.send_error_response(500, "Internal server error: No result from async task.")
 
 
             def _handle_get_sessions(self):
-                """Handle GET /api/sessions."""
+                """Handle GET /api/sessions (Synchronous)."""
                 try:
                     sessions = self.chat_interface.get_all_sessions()
                     sessions_data = [s.to_dict() for s in sessions]
@@ -311,21 +296,13 @@ class UIManager:
             # --- POST Handlers ---
             def do_POST(self):
                 """Handle POST requests."""
-                loop = self.ui_manager.get_event_loop() # Get the main loop
-                if not loop or not loop.is_running():
-                    self.logger.error("Event loop not available for POST handler.")
-                    self.send_error_response(500, "Internal server error: Event loop unavailable")
-                    return
-
                 try:
                     parsed_url = urlparse(self.path)
                     path = parsed_url.path
 
                     content_length = int(self.headers.get("Content-Length", 0))
-                    if content_length == 0:
-                         body_raw = ""
-                         body = {} # Assume empty dict if body is missing
-                    else:
+                    body = {}
+                    if content_length > 0:
                         body_raw = self.rfile.read(content_length).decode("utf-8")
                         try:
                             body = json.loads(body_raw)
@@ -333,14 +310,13 @@ class UIManager:
                             self.send_error_response(400, "Invalid JSON format in request body")
                             return
 
+                    # Route API POST requests
                     if path == "/api/settings":
-                        self._handle_post_settings(body) # Keep settings save synchronous
+                        self._handle_post_settings(body) # Synchronous
                     elif path == "/api/chat":
-                        self._handle_post_chat(body) # This uses run_coroutine_threadsafe
+                        self._handle_post_chat(body) # Runs async task and waits
                     elif path == "/api/discover_models":
-                         # Run async handler in the main loop
-                         asyncio.run_coroutine_threadsafe(self._handle_discover_models(), loop)
-                    # Add other POST endpoints as needed
+                        self._handle_post_discover_models() # Runs async task and waits
                     else:
                         self.send_error_response(404, "API endpoint not found")
 
@@ -349,162 +325,148 @@ class UIManager:
                 except Exception as e:
                     self.logger.error(f"POST request error for {self.path}: {e}", exc_info=True)
                     self.error_handler.handle_error(e, ErrorCategory.UI, ErrorSeverity.ERROR, {"path": self.path, "method": "POST"})
-                    # Avoid sending error if socket is likely broken
-                    # try:
-                    #     self.send_error_response(500, "Internal Server Error", str(e))
-                    # except:
-                    #      self.logger.error("Failed to send error response for POST request.")
+                    try:
+                        if not getattr(self, 'headers_sent', False):
+                             self.send_error_response(500, "Internal Server Error", str(e))
+                    except Exception:
+                         self.logger.error(f"Failed to send error response for POST {self.path}")
 
 
             def _handle_post_settings(self, body):
-                """Handle POST /api/settings."""
-                # Using previous version with detailed logging
+                """Handle POST /api/settings (Synchronous)."""
+                # (Code is the same as previous version - synchronous config/secret updates)
                 self.logger.info("Received POST /api/settings request.")
+                keys_saved = True
+                api_keys_failed = []
+                settings_failed = []
                 try:
                     # Separate API keys from regular settings
                     api_keys_to_set = {}
                     regular_settings = {}
-                    self.logger.debug(f"Processing settings body: {body}")
+                    # self.logger.debug(f"Processing settings body: {body}") # Avoid logging potentially sensitive values
 
                     for key, value in body.items():
-                        # Check for API key patterns (more robust check might be needed)
                         is_api_key_field = (
-                            (isinstance(key, str) and "api_key" in key.lower()) or # Direct key name check
-                            (key == "api.openrouter.api_key") or # Specific keys
-                            (key == "api.anthropic.api_key") or
-                            (key == "api.deepseek.api_key") or
-                            (key == "api.litellm.api_key")
+                            (isinstance(key, str) and "api_key" in key.lower()) or
+                             (key == "api.openrouter.api_key") or
+                             (key == "api.anthropic.api_key") or
+                             (key == "api.deepseek.api_key") or
+                             (key == "api.litellm.api_key")
                         )
 
                         if is_api_key_field and isinstance(value, str):
-                            # Extract provider name
                             provider_name = None
                             if key.startswith("api.") and key.endswith(".api_key"):
                                 parts = key.split('.')
-                                if len(parts) == 3:
-                                     provider_name = parts[1]
-                            elif "-api-key" in key: # Handle format like "openrouter-api-key"
-                                 provider_name = key.replace("-api-key", "")
+                                if len(parts) == 3: provider_name = parts[1]
+                            elif "-api-key" in key: provider_name = key.replace("-api-key", "")
 
                             if provider_name:
-                                api_keys_to_set[provider_name] = value
+                                # Only add if value is not empty
+                                if value: api_keys_to_set[provider_name] = value
+                                else: # If value is empty, treat as removal
+                                     self.logger.info(f"Removing API key for provider {provider_name} due to empty value.")
+                                     if not self.config_manager.remove_api_key(provider_name):
+                                         self.logger.warning(f"Failed to remove API key for {provider_name} (already removed or error).")
                             else:
                                 self.logger.warning(f"Could not determine provider for API key field: {key}")
-                                regular_settings[key] = value # Treat as regular if provider not clear
+                                regular_settings[key] = value
                         else:
                            regular_settings[key] = value
 
                     # Update regular settings
                     self.logger.debug(f"Updating regular settings: {regular_settings.keys()}")
                     for key, value in regular_settings.items():
-                        if not self.config_manager.set_config(key, value): # set_config returns bool
+                        if not self.config_manager.set_config(key, value):
                             self.logger.error(f"Failed to set regular setting: {key}")
-                            # Decide how to handle partial failure
+                            settings_failed.append(key)
                     self.logger.debug("Finished updating regular settings.")
 
                     # Update API keys (secrets)
-                    keys_saved = True
                     self.logger.debug(f"Updating API keys for providers: {api_keys_to_set.keys()}")
                     for provider, key_value in api_keys_to_set.items():
                         if not self.config_manager.set_api_key(provider, key_value):
                             keys_saved = False
+                            api_keys_failed.append(provider)
                             self.logger.error(f"Failed to save API key for {provider}")
                     self.logger.debug("Finished updating API keys.")
 
-                    if not keys_saved:
-                         self.logger.warning("Failed to save one or more API keys.") # Log before sending error
-                         self.send_error_response(500, "Failed to save one or more API keys")
+                    if settings_failed or api_keys_failed:
+                         error_msg = "Failed to update some settings."
+                         if settings_failed: error_msg += f" Settings: {', '.join(settings_failed)}."
+                         if api_keys_failed: error_msg += f" API Keys: {', '.join(api_keys_failed)}."
+                         self.logger.warning(error_msg)
+                         self.send_error_response(500, error_msg)
                          return
 
                     # Publish a general settings updated event
                     self.ui_manager.event_bus.publish_event("settings.updated", {"keys_updated": list(regular_settings.keys()) + list(api_keys_to_set.keys())})
 
-                    # *** Add log right before sending response ***
                     self.logger.info("Settings update processed successfully. Sending success response.")
                     self.send_json_response(200, {"status": "success", "message": "Settings updated"})
-                    self.logger.info("Settings updated via API (response sent).") # Log after sending
+                    self.logger.info("Settings updated via API (response sent).")
 
                 except Exception as e:
-                    # Log the specific exception *before* sending error response
                     self.logger.error(f"Error processing POST /api/settings: {e}", exc_info=True)
-                    try:
-                         self.send_error_response(500, "Failed to update settings", str(e))
-                    except:
-                         self.logger.error("Failed to send error response for POST /api/settings.")
+                    self.send_error_response(500, "Failed to update settings", str(e))
 
 
             def _handle_post_chat(self, body):
-                """Handle POST /api/chat."""
+                """Handle POST /api/chat (Runs async task and waits)."""
                 message_text = body.get("message")
-                session_id = body.get("session_id") # Optional: UI might specify session
+                session_id = body.get("session_id") # Optional
 
                 if not message_text:
-                    self.send_error_response(400, "Missing 'message' field in request body")
+                    self.send_error_response(400, "Missing 'message' field")
                     return
 
-                # Get the event loop the UIManager is running in
-                loop = self.ui_manager.get_event_loop()
-                if not loop or not loop.is_running():
-                    self.logger.error("Event loop not available for async chat processing.")
-                    self.send_error_response(500, "Internal server error: Event loop unavailable")
-                    return
+                # Define the async function to call
+                async def process_chat_async():
+                    return await self.chat_interface.process_message(message_text, session_id)
 
-                try:
-                    # Run the async `process_message` coroutine in the main event loop
-                    # Use run_coroutine_threadsafe because the HTTP server runs in a separate thread
-                    future = asyncio.run_coroutine_threadsafe(
-                        self.chat_interface.process_message(message_text, session_id),
-                        loop
-                    )
-                    # Wait for the result (consider adding a timeout)
-                    response_text = future.result(timeout=120) # 120 second timeout for LLM response
+                # Run the async task and wait for result
+                result, error = self.run_async_task(process_chat_async())
 
-                    self.send_json_response(200, {"status": "success", "response": response_text})
-                    self.logger.info(f"Chat message processed via API: {message_text[:50]}...")
+                # Handle result or error
+                if error:
+                    if isinstance(error, asyncio.TimeoutError):
+                        self.send_error_response(504, "Request timed out while waiting for chat response.")
+                    else:
+                        self.send_error_response(500, "Error processing message", str(error))
+                elif result is not None:
+                    self.send_json_response(200, {"status": "success", "response": result})
+                else:
+                    self.send_error_response(500, "Internal server error: No result from chat processing task.")
 
-                except asyncio.TimeoutError:
-                     self.logger.error("Timeout waiting for chat response.")
-                     self.send_error_response(504, "Request timed out while waiting for response.")
-                except Exception as e:
-                    self.logger.error(f"Error processing chat message via API: {e}", exc_info=True)
-                    self.error_handler.handle_error(e, ErrorCategory.UI, ErrorSeverity.ERROR, {"action": "post_chat"})
-                    self.send_error_response(500, "Error processing message", str(e))
 
-            async def _handle_discover_models(self):
-                 """Handle POST /api/discover_models (async)."""
-                 try:
-                     self.logger.info("Received request to discover models.")
-                     await self.model_selection_interface.discover_models()
-                     self.logger.info("Model discovery initiated successfully.")
-                     # Send response back from the async handler
-                     try:
-                         self.send_json_response(200, {"status": "success", "message": "Model discovery initiated."})
-                     except OSError as ose:
-                         if ose.errno == 9: # Bad file descriptor
-                             self.logger.warning(f"Socket closed before sending discovery response (OSError 9).")
-                         else:
-                             self.logger.error(f"OSError sending discovery response: {ose}", exc_info=True)
-                     except Exception as send_e:
-                         self.logger.error(f"Exception sending discovery response: {send_e}", exc_info=True)
+            def _handle_post_discover_models(self):
+                """Handle POST /api/discover_models (Runs async task and waits)."""
 
-                 except Exception as e:
-                     self.logger.error(f"Error initiating model discovery: {e}", exc_info=True)
-                     # Try sending error response, catching potential socket errors
-                     try:
-                         self.send_error_response(500, "Failed to start model discovery", str(e))
-                     except OSError as ose_err:
-                         if ose_err.errno == 9:
-                              self.logger.warning(f"Socket closed before sending discovery error response (OSError 9).")
-                         else:
-                              self.logger.error(f"OSError sending discovery error response: {ose_err}", exc_info=True)
-                     except Exception as send_err_e:
-                          self.logger.error(f"Exception sending discovery error response: {send_err_e}", exc_info=True)
+                # Define the async function to call
+                async def discover_models_async():
+                    await self.model_selection_interface.discover_models()
+                    # Maybe return the count or list of models? For now, just return success.
+                    return {"message": "Model discovery initiated and completed."} # Return data for JSON response
+
+                # Run the async task and wait for result
+                result, error = self.run_async_task(discover_models_async())
+
+                # Handle result or error
+                if error:
+                    if isinstance(error, asyncio.TimeoutError):
+                        self.send_error_response(504, "Request timed out while discovering models.")
+                    else:
+                        self.send_error_response(500, "Failed to run model discovery", str(error))
+                elif result is not None:
+                     # Send the result data back
+                    self.send_json_response(200, {"status": "success", **result})
+                else:
+                    self.send_error_response(500, "Internal server error: No result from discovery task.")
 
 
             # --- Static File Serving ---
             def _serve_static_file(self, path):
                 """Serve a static file."""
-                # Basic security: prevent directory traversal
                 if ".." in path:
                     self.send_error_response(403, "Forbidden path")
                     return
@@ -512,29 +474,24 @@ class UIManager:
                 if path == "/" or path == "":
                     file_path = Path(self.ui_manager.static_dir) / "index.html"
                 else:
-                    # Remove leading slash
                     path = path[1:] if path.startswith("/") else path
                     file_path = Path(self.ui_manager.static_dir) / path
 
-                # Check if file exists and is within the static directory
                 if not file_path.is_file() or not str(file_path.resolve()).startswith(str(Path(self.ui_manager.static_dir).resolve())):
+                    # Log before sending error
+                    self.logger.debug(f"Static file not found or outside base directory: {file_path}")
                     self.send_error_response(404, f"File not found: {path}")
                     return
 
-                # Determine content type
                 content_type = self._get_content_type(file_path)
-
-                # Send the file
                 try:
                     self.send_response(200)
                     self.send_header("Content-Type", content_type)
                     self.send_header("Content-Length", str(file_path.stat().st_size))
-                    # Add Cache-Control header for better performance
                     if content_type in ["text/css", "application/javascript", "image/png", "image/jpeg", "image/gif", "image/svg+xml", "image/x-icon"]:
-                        self.send_header("Cache-Control", "public, max-age=3600") # Cache for 1 hour
+                        self.send_header("Cache-Control", "public, max-age=3600")
                     else:
                         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-
                     self.end_headers()
                     with file_path.open("rb") as f:
                         self.wfile.write(f.read())
@@ -542,49 +499,25 @@ class UIManager:
                      self.logger.warning(f"Client connection error serving static file {file_path}: {client_err}")
                 except Exception as e:
                     self.logger.error(f"Error serving static file {file_path}: {e}", exc_info=True)
-                    self.error_handler.handle_error(e, ErrorCategory.UI, ErrorSeverity.ERROR, {"path": path, "file_path": str(file_path)})
-                    # Don't send another response if headers might already be sent
+                    # Avoid sending error if headers are already sent/broken
 
 
             def _get_content_type(self, file_path: Path) -> str:
                 """Get the content type for a file."""
-                content_types = {
-                    ".html": "text/html", ".htm": "text/html",
-                    ".css": "text/css",
-                    ".js": "application/javascript",
-                    ".json": "application/json",
-                    ".png": "image/png",
-                    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                    ".gif": "image/gif",
-                    ".svg": "image/svg+xml",
-                    ".ico": "image/x-icon",
-                    ".txt": "text/plain",
-                    # Add more types as needed
-                }
+                content_types = { ".html": "text/html", ".htm": "text/html", ".css": "text/css", ".js": "application/javascript", ".json": "application/json", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".txt": "text/plain"}
                 return content_types.get(file_path.suffix.lower(), "application/octet-stream")
         # --- End of RequestHandler Class ---
 
         try:
-            # Enable address reuse to prevent "Address already in use" errors on restart
             socketserver.TCPServer.allow_reuse_address = True
-
-            # Create and start the server
             self.httpd = HTTPServer((self.host, self.port), CustomHandler)
-
-            # Start the server in a separate thread
             self.server_thread = threading.Thread(target=self.httpd.serve_forever, name="WebServerThread")
-            self.server_thread.daemon = True # Allow program exit even if thread is running
+            self.server_thread.daemon = True
             self.server_thread.start()
-
             self.logger.info(f"Web server starting on http://{self.host}:{self.port}")
-
         except OSError as e:
              self.logger.critical(f"Failed to start web server on {self.host}:{self.port}: {e}", exc_info=True)
              self.error_handler.handle_error(e, ErrorCategory.NETWORK, ErrorSeverity.FATAL, {"host": self.host, "port": self.port})
-             # Consider shutting down the whole application if the UI server is critical
-             # system_manager = SystemManager.get_instance() # Assuming you have access or pass it
-             # system_manager.shutdown(force_exit=True)
-             # Or raise the exception to be caught by the main starter
              raise
         except Exception as e:
              self.logger.critical(f"Unexpected error starting web server: {e}", exc_info=True)
@@ -593,58 +526,33 @@ class UIManager:
 
     def _on_settings_updated(self, event: Event) -> None:
         """Handle settings updated event."""
-        # Example: Reload config if needed, though ConfigManager handles this
         self.logger.debug(f"Settings updated event received: {event.data}")
-        # Add specific actions if UI needs to react directly to setting changes
 
-    # --- Public Methods to Control UI State (Called from other components) ---
-
+    # --- Public Methods to Control UI State ---
     def set_theme(self, theme: UITheme) -> None:
-        """
-        Set the UI theme (sends event, UI needs to listen).
-
-        Args:
-            theme: Theme to set
-        """
-        # This method might just update config; the actual UI change happens client-side
         self.config_manager.set_config("ui.theme", theme.name.lower())
         self.event_bus.publish_event("ui.theme.changed", {"theme": theme.name.lower()})
         self.logger.debug(f"Set theme to {theme.name}")
 
     def set_font_size(self, font_size: int) -> None:
-        """Set the UI font size (sends event)."""
         self.config_manager.set_config("ui.font_size", font_size)
         self.event_bus.publish_event("ui.fontsize.changed", {"size": font_size})
         self.logger.debug(f"Set font size to {font_size}")
 
     def toggle_animations(self, enabled: bool) -> None:
-        """Toggle UI animations (sends event)."""
         self.config_manager.set_config("ui.animations_enabled", enabled)
         self.event_bus.publish_event("ui.animations.toggled", {"enabled": enabled})
         self.logger.debug(f"Set animations enabled to {enabled}")
 
     def toggle_compact_mode(self, enabled: bool) -> None:
-        """Toggle UI compact mode (sends event)."""
         self.config_manager.set_config("ui.compact_mode", enabled)
         self.event_bus.publish_event("ui.compactmode.toggled", {"enabled": enabled})
         self.logger.debug(f"Set compact mode to {enabled}")
 
     def show_notification(self, message: str, type: str = "info", duration: int = 3000) -> None:
-        """
-        Show a notification in the UI (sends event).
-
-        Args:
-            message: Notification message
-            type: Notification type (info, success, warning, error)
-            duration: Duration in milliseconds
-        """
-        self.event_bus.publish_event("ui.notification.show", {
-            "message": message,
-            "type": type,
-            "duration": duration
-        })
+        self.event_bus.publish_event("ui.notification.show", {"message": message, "type": type, "duration": duration})
         self.logger.debug(f"Sent notification: {message}")
 
     def show_error(self, message: str) -> None:
-        """Show an error message in the UI (uses notification event)."""
         self.show_notification(message, type="error", duration=5000)
+# END OF FILE miniManus-main/minimanus/ui/ui_manager.py
