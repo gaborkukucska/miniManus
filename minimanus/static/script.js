@@ -1,32 +1,59 @@
-// minimanus/static/script.js
-
+// START OF FILE miniManus-main/static/script.js
 document.addEventListener('DOMContentLoaded', () => {
-    // --- DOM Elements ---
-    const chatTab = document.getElementById('chat-tab');
-    const settingsTab = document.getElementById('settings-tab');
-    const chatSection = document.getElementById('chat-section');
-    const settingsSection = document.getElementById('settings-section');
     const chatMessages = document.getElementById('chat-messages');
     const messageInput = document.getElementById('message-input');
     const sendButton = document.getElementById('send-button');
+    const settingsTab = document.getElementById('settings-tab');
+    const chatTab = document.getElementById('chat-tab');
+    const settingsSection = document.getElementById('settings-section');
+    const chatSection = document.getElementById('chat-section');
+    const saveSettingsButton = document.getElementById('save-settings');
 
-    // Settings Elements
+    // Settings elements
     const defaultProviderSelect = document.getElementById('default-provider');
     const providerSettingsDivs = document.querySelectorAll('.provider-settings');
     const themeSelect = document.getElementById('theme');
     const fontSizeSlider = document.getElementById('font-size');
     const fontSizeValue = document.getElementById('font-size-value');
     const animationsCheckbox = document.getElementById('animations');
-    const saveSettingsButton = document.getElementById('save-settings');
+    const compactModeCheckbox = document.getElementById('compact-mode');
 
-    // --- State ---
-    let currentSettings = {};
-    let isLoading = false; // To prevent multiple chat submissions
+    // --- Global State (Simple) ---
+    let currentSettings = {}; // Store loaded settings
+    let availableModels = {}; // Store models fetched per provider: { providerName: [modelData] }
 
-    // --- Functions ---
+    // --- Theme Handling ---
+    const applyTheme = (theme) => {
+        document.body.classList.remove('light-theme', 'dark-theme');
+        if (theme === 'light') {
+            document.body.classList.add('light-theme');
+        } else if (theme === 'dark') {
+            document.body.classList.add('dark-theme');
+        } else { // System theme
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            if (prefersDark) {
+                document.body.classList.add('dark-theme');
+            } else {
+                document.body.classList.add('light-theme'); // Default to light if system pref unknown/light
+            }
+        }
+    };
 
-    // Basic API Fetch Helper
-    async function apiRequest(endpoint, method = 'GET', body = null) {
+    const setInitialTheme = (savedTheme) => {
+        applyTheme(savedTheme || 'dark'); // Default to dark if no setting
+    };
+
+    // --- Font Size Handling ---
+    const applyFontSize = (size) => {
+        const sizePx = size + 'px';
+        document.body.style.fontSize = sizePx;
+        if (fontSizeValue) {
+            fontSizeValue.textContent = sizePx;
+        }
+    };
+
+    // --- API Interaction ---
+    const apiRequest = async (endpoint, method = 'GET', body = null) => {
         const options = {
             method: method,
             headers: {
@@ -39,340 +66,385 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
+            console.debug(`API Request: ${method} ${endpoint}`, body ? options.body : '');
             const response = await fetch(endpoint, options);
             if (!response.ok) {
-                const errorData = await response.json().catch(() => ({ message: `HTTP error! status: ${response.status}` }));
-                throw new Error(errorData.message || `HTTP error! status: ${response.status}`);
-            }
-            return await response.json();
-        } catch (error) {
-            console.error(`API request failed for ${endpoint}:`, error);
-            alert(`API request failed: ${error.message}`); // Simple error feedback
-            throw error; // Re-throw for calling function to handle if needed
-        }
-    }
-
-    // Load Settings from Backend
-    async function loadSettings() {
-        try {
-            const settings = await apiRequest('/api/settings');
-            currentSettings = settings; // Store loaded settings
-            applySettingsToUI(settings);
-            console.log('Settings loaded:', settings);
-        } catch (error) {
-            console.error('Failed to load settings:', error);
-            alert('Failed to load settings from the server.');
-        }
-    }
-
-    // Apply loaded settings to the UI form
-    function applySettingsToUI(settings) {
-        // API Settings
-        defaultProviderSelect.value = settings?.api?.default_provider || 'openrouter';
-        updateVisibleProviderSettings(); // Show settings for the default provider
-
-        // Populate API Keys and Default Models for each provider
-        const providers = settings?.api?.providers || {};
-        for (const providerKey in providers) {
-            const providerSettings = providers[providerKey];
-            const apiKeyInput = document.getElementById(`${providerKey}-api-key`);
-            const modelSelect = document.getElementById(`${providerKey}-model`);
-            const hostInput = document.getElementById(`${providerKey}-host`); // For Ollama/LiteLLM
-
-            if (apiKeyInput) {
-                 // Load API key from secrets (if backend provided it securely, otherwise it remains blank)
-                 // NOTE: Backend /api/settings GET should NOT return secrets.
-                 // API keys are typically write-only from UI or loaded client-side if needed, which isn't ideal.
-                 // For now, we assume keys are set and saved, but not displayed back.
-                 // apiKeyInput.value = settings?.secrets?.api_keys?.[providerKey] || ''; // Don't do this!
-            }
-            if (hostInput) {
-                 hostInput.value = providerSettings?.base_url || ''; // Use base_url for host
-            }
-            if (modelSelect) {
-                // We'll populate models dynamically later, just set the saved default for now
-                const defaultModel = providerSettings?.default_model;
-                // Check if the default model exists as an option before setting it
-                let found = false;
-                for(let i=0; i < modelSelect.options.length; i++) {
-                    if (modelSelect.options[i].value === defaultModel) {
-                        found = true;
-                        break;
-                    }
+                let errorData;
+                try {
+                    errorData = await response.json();
+                } catch (e) {
+                    errorData = { message: `HTTP error ${response.status}` };
                 }
-                // If not found, maybe add it? Or just select first? For now, leave as is or select first.
-                if (defaultModel && found) {
-                    modelSelect.value = defaultModel;
-                } else if (defaultModel) {
-                     console.warn(`Default model '${defaultModel}' for ${providerKey} not found in static options. Fetching models...`);
-                     // Fetch models to potentially add it, then set value
-                     loadModelsForProvider(providerKey, defaultModel);
-                } else {
-                    // Select the first option if no default is set or found
-                    modelSelect.selectedIndex = 0;
-                }
+                console.error(`API Error (${response.status}):`, errorData);
+                throw new Error(errorData.message || `HTTP error ${response.status}`);
             }
-        }
-
-
-        // UI Settings
-        themeSelect.value = settings?.ui?.theme || 'dark';
-        applyTheme(themeSelect.value);
-
-        const savedFontSize = settings?.ui?.font_size || 14;
-        fontSizeSlider.value = savedFontSize;
-        fontSizeValue.textContent = `${savedFontSize}px`;
-        applyFontSize(savedFontSize);
-
-        animationsCheckbox.checked = settings?.ui?.animations_enabled !== false; // Default true
-        // Apply animations setting (e.g., add/remove a class to body)
-        document.body.classList.toggle('animations-disabled', !animationsCheckbox.checked);
-
-
-        // Ensure correct provider settings are visible
-        updateVisibleProviderSettings();
-        // Load models for the initially selected provider
-        loadModelsForProvider(defaultProviderSelect.value);
-    }
-
-    // Save Settings to Backend
-    async function saveSettings() {
-        const settingsToSave = {
-            api: {
-                default_provider: defaultProviderSelect.value,
-                providers: {}
-            },
-            ui: {
-                theme: themeSelect.value,
-                font_size: parseInt(fontSizeSlider.value, 10),
-                animations_enabled: animationsCheckbox.checked
+            // Handle empty response for methods like POST that might return 200 OK with no body
+            if (response.status === 204 || response.headers.get('Content-Length') === '0') {
+                return null; // Or return an empty object/success indicator as needed
             }
-            // Include other top-level settings groups if necessary
-        };
-
-        // Collect provider-specific settings (API keys, default models, hosts)
-        providerSettingsDivs.forEach(div => {
-            const providerKey = div.id.replace('-settings', '');
-            const apiKeyInput = document.getElementById(`${providerKey}-api-key`);
-            const modelSelect = document.getElementById(`${providerKey}-model`);
-            const hostInput = document.getElementById(`${providerKey}-host`);
-
-             settingsToSave.api.providers[providerKey] = {
-                  // Only include keys/hosts if the input exists
-                  ...(apiKeyInput && { api_key: apiKeyInput.value }), // Send key ONLY if user entered/changed it
-                  ...(hostInput && { base_url: hostInput.value }),
-                  ...(modelSelect && { default_model: modelSelect.value }),
-             };
-             // IMPORTANT: We are sending the API key here. The backend MUST handle this securely
-             // and store it in secrets.json, not config.json.
-             // Clear the input after saving? Maybe not, user might want to see it's set (masked).
-        });
-
-
-        try {
-            // Send ONLY the settings structure defined above
-            const result = await apiRequest('/api/settings', 'POST', settingsToSave);
-            if (result.status === 'success') {
-                alert('Settings saved successfully!');
-                currentSettings = await apiRequest('/api/settings'); // Reload effective settings
-                applySettingsToUI(currentSettings); // Re-apply to ensure consistency
-            } else {
-                 throw new Error(result.message || 'Unknown error saving settings.');
-            }
+            const data = await response.json();
+            console.debug(`API Response: ${method} ${endpoint}`, data);
+            return data;
         } catch (error) {
-            console.error('Failed to save settings:', error);
-            alert(`Failed to save settings: ${error.message}`);
+            console.error(`API Request Failed: ${method} ${endpoint}`, error);
+            // Optionally display error to user
+            // addMessage('assistant', `Error communicating with backend: ${error.message}`);
+            throw error; // Re-throw for caller handling if necessary
         }
-    }
+    };
 
-    // Update visibility of provider-specific settings blocks
-    function updateVisibleProviderSettings() {
+    // --- Settings ---
+
+    const updateProviderSettingsVisibility = () => {
         const selectedProvider = defaultProviderSelect.value;
         providerSettingsDivs.forEach(div => {
             div.style.display = div.id === `${selectedProvider}-settings` ? 'block' : 'none';
         });
-         // Fetch models for the newly selected provider
-         loadModelsForProvider(selectedProvider);
-    }
+        // Fetch models for the newly selected provider if not already fetched
+        if (selectedProvider && !availableModels[selectedProvider]) {
+            fetchAndPopulateModels(selectedProvider);
+        } else if (selectedProvider && availableModels[selectedProvider]) {
+            // Models already fetched, just populate dropdown
+             populateModelDropdown(selectedProvider, availableModels[selectedProvider]);
+        }
+    };
 
-     // Load models for a specific provider and update its dropdown
-     async function loadModelsForProvider(providerKey, selectedValue = null) {
-        const modelSelect = document.getElementById(`${providerKey}-model`);
-        if (!modelSelect) return; // No model dropdown for this provider (e.g., if settings HTML is incomplete)
+    // Function to fetch models for a specific provider
+    const fetchAndPopulateModels = async (providerName) => {
+        const modelSelect = document.getElementById(`${providerName}-model`);
+        if (!modelSelect) return; // Element doesn't exist
 
-        // Add a loading option
+        // Show loading state
         modelSelect.innerHTML = '<option value="" disabled selected>Loading models...</option>';
+        modelSelect.disabled = true;
 
         try {
-            const data = await apiRequest(`/api/models?provider=${providerKey}`);
-            const models = data.models || [];
+            console.log(`Fetching models for provider: ${providerName}...`);
+            const data = await apiRequest(`/api/models?provider=${providerName}`);
+            availableModels[providerName] = data.models || []; // Store fetched models
+            populateModelDropdown(providerName, availableModels[providerName]);
+            console.log(`Successfully fetched ${availableModels[providerName].length} models for ${providerName}.`);
 
-            modelSelect.innerHTML = ''; // Clear loading/previous options
+             // Restore selected value after populating
+            const savedModel = currentSettings?.api?.providers?.[providerName]?.default_model;
+            if (savedModel) {
+                modelSelect.value = savedModel;
+                 // Fallback if saved value isn't in the list
+                if (modelSelect.value !== savedModel && modelSelect.options.length > 1) {
+                     modelSelect.selectedIndex = 1; // Select the first actual model
+                     console.warn(`Saved default model '${savedModel}' not found for ${providerName}. Selecting first available.`);
+                } else if (modelSelect.value !== savedModel) {
+                     // No models available other than "loading..."
+                     modelSelect.innerHTML = '<option value="" disabled selected>No models found</option>';
+                }
+            } else if(modelSelect.options.length > 1) {
+                // If no saved model, select the first actual model in the list
+                 modelSelect.selectedIndex = 1;
+            } else if (modelSelect.options.length <= 1){
+                 modelSelect.innerHTML = '<option value="" disabled selected>No models found</option>';
+            }
 
-            if (models.length === 0) {
-                modelSelect.innerHTML = '<option value="" disabled selected>No models found</option>';
-                // Fallback: use the statically defined default from config if API fails?
-                 const fallbackModel = currentSettings?.api?.providers?.[providerKey]?.default_model;
-                 if(fallbackModel) {
-                     const option = document.createElement('option');
-                     option.value = fallbackModel;
-                     option.textContent = `${fallbackModel} (Default/Offline)`;
-                     modelSelect.appendChild(option);
-                     modelSelect.value = fallbackModel; // Select it
-                 }
-                 console.warn(`No models loaded for ${providerKey}.`);
+        } catch (error) {
+            console.error(`Failed to fetch models for ${providerName}:`, error);
+            modelSelect.innerHTML = '<option value="" disabled selected>Error loading models</option>';
+            // Optionally add a retry button or mechanism
+        } finally {
+            modelSelect.disabled = false; // Re-enable select even on error
+        }
+    };
 
+    // Function to populate a model dropdown
+    const populateModelDropdown = (providerName, models) => {
+        const modelSelect = document.getElementById(`${providerName}-model`);
+        if (!modelSelect) return;
+
+        // Clear existing options except the placeholder
+        modelSelect.innerHTML = '<option value="" disabled selected>Select a model...</option>';
+
+        if (models && models.length > 0) {
+            models.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model.id;
+                // Use name for display, fallback to id
+                option.textContent = model.name ? `${model.name} (${model.id})` : model.id;
+                modelSelect.appendChild(option);
+            });
+        } else {
+            modelSelect.innerHTML = '<option value="" disabled selected>No models found</option>';
+        }
+    };
+
+
+    const loadSettings = async () => {
+        try {
+            console.log("Loading settings from backend...");
+            currentSettings = await apiRequest('/api/settings');
+            console.log("Settings loaded:", currentSettings);
+
+            // Populate UI elements
+            if (currentSettings.ui) {
+                themeSelect.value = currentSettings.ui.theme || 'dark';
+                fontSizeSlider.value = currentSettings.ui.font_size || 14;
+                animationsCheckbox.checked = currentSettings.ui.animations_enabled !== false; // Default true
+                compactModeCheckbox.checked = currentSettings.ui.compact_mode === true; // Default false
+                applyFontSize(fontSizeSlider.value); // Apply loaded font size
+                setInitialTheme(themeSelect.value); // Apply loaded theme
             } else {
-                models.forEach(model => {
-                    const option = document.createElement('option');
-                    option.value = model.id; // Use the model ID as the value
-                    option.textContent = model.name || model.id; // Display name or ID
-                    modelSelect.appendChild(option);
-                });
+                 // Apply defaults if ui section missing
+                 applyFontSize(14);
+                 setInitialTheme('dark');
+            }
 
-                // Try to set the previously selected value or the provider's default
-                const valueToSelect = selectedValue || currentSettings?.api?.providers?.[providerKey]?.default_model;
-                if (valueToSelect && modelSelect.querySelector(`option[value="${valueToSelect}"]`)) {
-                     modelSelect.value = valueToSelect;
-                 } else if (models.length > 0) {
-                     modelSelect.selectedIndex = 0; // Select the first model if default/previous not found
+
+            if (currentSettings.api && currentSettings.api.default_provider) {
+                defaultProviderSelect.value = currentSettings.api.default_provider;
+            }
+
+            // Populate provider-specific fields
+            const providers = currentSettings?.api?.providers || {};
+            for (const providerName in providers) {
+                const providerConfig = providers[providerName];
+                const apiKeyInput = document.getElementById(`${providerName}-api-key`);
+                const modelSelect = document.getElementById(`${providerName}-model`);
+                const baseUrlInput = document.getElementById(`${providerName}-base_url`);
+                const discoveryCheckbox = document.getElementById(`${providerName}-discovery_enabled`);
+                 const embeddingModelInput = document.getElementById(`${providerName}-embedding-model`); // Generic embedding model field name
+                 const refererInput = document.getElementById(`${providerName}-referer`);
+                 const xTitleInput = document.getElementById(`${providerName}-x_title`);
+
+
+                // API Key (Secrets are not sent, so this field will be blank)
+                if (apiKeyInput) {
+                    apiKeyInput.value = ''; // Clear on load, user needs to re-enter if changed
+                    apiKeyInput.placeholder = 'Enter API Key (if needed)';
+                }
+                // Base URL
+                if (baseUrlInput && providerConfig.base_url) {
+                    baseUrlInput.value = providerConfig.base_url;
+                }
+                 // Embedding Model
+                 if (embeddingModelInput && providerConfig.embedding_model) {
+                     embeddingModelInput.value = providerConfig.embedding_model;
+                 }
+                 // Discovery Enabled
+                 if (discoveryCheckbox) {
+                     discoveryCheckbox.checked = providerConfig.discovery_enabled !== false; // Default true if not present
+                 }
+                 // OpenRouter Specific Headers
+                 if (refererInput && providerConfig.referer) {
+                     refererInput.value = providerConfig.referer;
+                 }
+                  if (xTitleInput && providerConfig.x_title) {
+                     xTitleInput.value = providerConfig.x_title;
+                 }
+
+
+                // Default Model (set value, but don't populate options yet)
+                if (modelSelect && providerConfig.default_model) {
+                    // We just set the value for now. fetchAndPopulateModels will handle options.
+                     // Ensure the select has at least the saved option temporarily
+                     let found = false;
+                     for (let i = 0; i < modelSelect.options.length; i++) {
+                         if (modelSelect.options[i].value === providerConfig.default_model) {
+                             found = true;
+                             break;
+                         }
+                     }
+                     if (!found) {
+                          const tempOption = document.createElement('option');
+                          tempOption.value = providerConfig.default_model;
+                          tempOption.textContent = `${providerConfig.default_model} (saved)`;
+                          tempOption.selected = true;
+                          modelSelect.appendChild(tempOption);
+                     }
+                     modelSelect.value = providerConfig.default_model;
+                }
+            }
+
+            updateProviderSettingsVisibility(); // Show correct provider section initially
+            console.log("Settings applied to UI.");
+
+
+        } catch (error) {
+            console.error("Failed to load settings:", error);
+            // Handle error (e.g., show message to user)
+        }
+    };
+
+    const saveSettings = async () => {
+        const settingsToSave = {
+            "ui.theme": themeSelect.value,
+            "ui.font_size": parseInt(fontSizeSlider.value, 10),
+            "ui.animations_enabled": animationsCheckbox.checked,
+            "ui.compact_mode": compactModeCheckbox.checked,
+            "api.default_provider": defaultProviderSelect.value,
+        };
+
+        // Get provider specific settings
+        const providers = currentSettings?.api?.providers ? Object.keys(currentSettings.api.providers) : ['openrouter', 'anthropic', 'deepseek', 'ollama', 'litellm']; // Fallback list
+        providers.forEach(providerName => {
+            const apiKeyInput = document.getElementById(`${providerName}-api-key`);
+            const modelSelect = document.getElementById(`${providerName}-model`);
+            const baseUrlInput = document.getElementById(`${providerName}-base_url`);
+            const discoveryCheckbox = document.getElementById(`${providerName}-discovery_enabled`);
+            const embeddingModelInput = document.getElementById(`${providerName}-embedding-model`);
+            const refererInput = document.getElementById(`${providerName}-referer`);
+            const xTitleInput = document.getElementById(`${providerName}-x_title`);
+
+
+            // Save API key ONLY if user entered something (it's not loaded from backend)
+            if (apiKeyInput && apiKeyInput.value) {
+                settingsToSave[`api.${providerName}.api_key`] = apiKeyInput.value;
+            }
+            if (modelSelect) {
+                 // Ensure a value is selected before saving, don't save the placeholder ""
+                 if(modelSelect.value) {
+                    settingsToSave[`api.${providerName}.default_model`] = modelSelect.value;
+                 } else {
+                     // Optionally save null or remove the key if nothing is selected
+                     console.warn(`No model selected for ${providerName}, not saving default_model.`);
                  }
             }
-        } catch (error) {
-            console.error(`Failed to load models for ${providerKey}:`, error);
-            modelSelect.innerHTML = '<option value="" disabled selected>Error loading models</option>';
-             // Fallback like above
-             const fallbackModel = currentSettings?.api?.providers?.[providerKey]?.default_model;
-             if(fallbackModel) {
-                 const option = document.createElement('option');
-                 option.value = fallbackModel;
-                 option.textContent = `${fallbackModel} (Default/Offline)`;
-                 modelSelect.appendChild(option);
-                 modelSelect.value = fallbackModel;
-             }
-        }
-    }
+            if (baseUrlInput) {
+                settingsToSave[`api.${providerName}.base_url`] = baseUrlInput.value;
+            }
+            if (discoveryCheckbox) {
+                 settingsToSave[`api.${providerName}.discovery_enabled`] = discoveryCheckbox.checked;
+            }
+            if (embeddingModelInput) {
+                 settingsToSave[`api.${providerName}.embedding_model`] = embeddingModelInput.value;
+            }
+            // OpenRouter Specific Headers
+            if (refererInput) {
+                settingsToSave[`api.${providerName}.referer`] = refererInput.value;
+            }
+            if (xTitleInput) {
+                settingsToSave[`api.${providerName}.x_title`] = xTitleInput.value;
+            }
+        });
 
-    // Add Message to Chat UI
-    function addChatMessage(role, text) {
-        const messageDiv = document.createElement('div');
-        messageDiv.classList.add('message', `${role}-message`); // e.g., 'user-message' or 'assistant-message'
-
-        const contentDiv = document.createElement('div');
-        contentDiv.classList.add('message-content');
-        // Basic sanitization (replace potential HTML tags) - consider a more robust library if needed
-        contentDiv.textContent = text;
-         // Simple Markdown rendering (bold, italics) - needs improvement for code blocks etc.
-         // contentDiv.innerHTML = text
-         //    .replace(/</g, "<").replace(/>/g, ">") // Basic HTML escape
-         //    .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') // Bold
-         //    .replace(/\*(.*?)\*/g, '<i>$1</i>'); // Italics
-
-        messageDiv.appendChild(contentDiv);
-        chatMessages.appendChild(messageDiv);
-
-        // Scroll to bottom
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-    }
-
-    // Send Chat Message
-    async function sendChatMessage() {
-        const messageText = messageInput.value.trim();
-        if (!messageText || isLoading) {
-            return;
-        }
-
-        isLoading = true;
-        sendButton.disabled = true;
-        sendButton.textContent = 'Sending...';
-        addChatMessage('user', messageText);
-        messageInput.value = ''; // Clear input after sending
+        console.log("Saving settings:", settingsToSave);
 
         try {
-            // Use current session ID (UI needs session management later)
-            const response = await apiRequest('/api/chat', 'POST', { message: messageText /*, session_id: currentSessionId */ });
-            addChatMessage('assistant', response.response);
+            await apiRequest('/api/settings', 'POST', settingsToSave);
+            console.log("Settings saved successfully.");
+            // Optionally show success message
+            alert("Settings saved!");
+             // Clear password fields after successful save
+             providers.forEach(providerName => {
+                 const apiKeyInput = document.getElementById(`${providerName}-api-key`);
+                 if (apiKeyInput) apiKeyInput.value = '';
+             });
+             // Reload settings to confirm changes (optional, good practice)
+             await loadSettings();
         } catch (error) {
-            addChatMessage('assistant', `Error: ${error.message}`); // Show error in chat
+            console.error("Failed to save settings:", error);
+            // Show error message to user
+            alert(`Error saving settings: ${error.message}`);
+        }
+    };
+
+
+    // --- Chat ---
+    const addMessage = (role, text) => {
+        const messageDiv = document.createElement('div');
+        messageDiv.classList.add('message', `${role}-message`);
+        const contentDiv = document.createElement('div');
+        contentDiv.classList.add('message-content');
+        contentDiv.textContent = text; // Use textContent for security
+        messageDiv.appendChild(contentDiv);
+        chatMessages.appendChild(messageDiv);
+        chatMessages.scrollTop = chatMessages.scrollHeight; // Scroll to bottom
+    };
+
+    const sendMessage = async () => {
+        const messageText = messageInput.value.trim();
+        if (!messageText) return;
+
+        addMessage('user', messageText);
+        messageInput.value = '';
+        messageInput.style.height = '40px'; // Reset height
+        sendButton.disabled = true; // Disable button while waiting
+
+        try {
+            const response = await apiRequest('/api/chat', 'POST', { message: messageText });
+            if (response && response.response) {
+                addMessage('assistant', response.response);
+            } else {
+                addMessage('assistant', 'Received an empty or invalid response.');
+            }
+        } catch (error) {
+            addMessage('assistant', `Error: ${error.message}`);
         } finally {
-            isLoading = false;
-            sendButton.disabled = false;
-            sendButton.textContent = 'Send';
-            messageInput.focus(); // Return focus to input
+            sendButton.disabled = false; // Re-enable button
         }
-    }
+    };
 
-    // Apply Theme
-    function applyTheme(themeName) {
-        document.body.classList.remove('light-theme', 'dark-theme'); // Remove existing themes
-        if (themeName === 'light') {
-            document.body.classList.add('light-theme');
-        } else if (themeName === 'dark') {
-            document.body.classList.add('dark-theme');
-        } else {
-            // Handle 'system' theme - check preference and apply light/dark
-            const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-            document.body.classList.add(prefersDark ? 'dark-theme' : 'light-theme');
+    // --- UI Navigation ---
+    const switchTab = (targetTab) => {
+        // Hide all sections
+        document.querySelectorAll('.section').forEach(section => {
+            section.classList.remove('active-section');
+        });
+        // Deactivate all nav links
+        document.querySelectorAll('nav a').forEach(link => {
+            link.classList.remove('active');
+        });
+
+        // Show target section
+        const sectionToShow = document.getElementById(`${targetTab}-section`);
+        if (sectionToShow) {
+            sectionToShow.classList.add('active-section');
         }
-        // Ensure dark theme variables apply correctly if needed by switching the class
-         document.body.classList.toggle('dark-theme', document.body.classList.contains('dark-theme'));
-    }
+        // Activate target nav link
+        const linkToActivate = document.querySelector(`nav a[data-tab="${targetTab}"]`);
+        if (linkToActivate) {
+            linkToActivate.classList.add('active');
+        }
 
-     // Apply Font Size
-     function applyFontSize(size) {
-          document.documentElement.style.setProperty('--font-size', `${size}px`);
-          fontSizeValue.textContent = `${size}px`;
-     }
+        // Fetch models if switching to settings tab and provider models aren't loaded
+        if(targetTab === 'settings') {
+             const selectedProvider = defaultProviderSelect.value;
+             if(selectedProvider && !availableModels[selectedProvider]) {
+                 fetchAndPopulateModels(selectedProvider);
+             }
+        }
+    };
 
     // --- Event Listeners ---
+    sendButton.addEventListener('click', sendMessage);
 
-    // Tab Navigation
-    chatTab.addEventListener('click', (e) => {
-        e.preventDefault();
-        chatSection.classList.add('active-section');
-        settingsSection.classList.remove('active-section');
-        chatTab.classList.add('active');
-        settingsTab.classList.remove('active');
-    });
-
-    settingsTab.addEventListener('click', (e) => {
-        e.preventDefault();
-        settingsSection.classList.add('active-section');
-        chatSection.classList.remove('active-section');
-        settingsTab.classList.add('active');
-        chatTab.classList.remove('active');
-    });
-
-    // Chat Input
-    sendButton.addEventListener('click', sendChatMessage);
     messageInput.addEventListener('keypress', (e) => {
-        // Send on Enter, allow Shift+Enter for newline
         if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault(); // Prevent default newline insertion
-            sendChatMessage();
+            e.preventDefault(); // Prevent newline
+            sendMessage();
         }
     });
 
-     // Settings Listeners
-     defaultProviderSelect.addEventListener('change', updateVisibleProviderSettings);
-     saveSettingsButton.addEventListener('click', saveSettings);
-     themeSelect.addEventListener('change', (e) => applyTheme(e.target.value));
-     fontSizeSlider.addEventListener('input', (e) => applyFontSize(e.target.value));
-     animationsCheckbox.addEventListener('change', (e) => {
-          document.body.classList.toggle('animations-disabled', !e.target.checked);
-     });
+    // Auto-resize textarea
+    messageInput.addEventListener('input', () => {
+        messageInput.style.height = 'auto'; // Temporarily shrink
+        messageInput.style.height = (messageInput.scrollHeight) + 'px'; // Set to scroll height
+    });
 
-    // --- Initial Load ---
-    loadSettings();
+    // Tab switching
+    document.querySelectorAll('nav a').forEach(link => {
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            const tab = e.target.getAttribute('data-tab');
+            switchTab(tab);
+        });
+    });
 
-}); // End DOMContentLoaded
+    // Settings listeners
+    saveSettingsButton.addEventListener('click', saveSettings);
+    defaultProviderSelect.addEventListener('change', updateProviderSettingsVisibility);
+    themeSelect.addEventListener('change', () => applyTheme(themeSelect.value));
+    fontSizeSlider.addEventListener('input', () => applyFontSize(fontSizeSlider.value));
 
-// Optional: Add listener for system theme changes
-window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
-    const themeSelect = document.getElementById('theme');
-    if (themeSelect && themeSelect.value === 'system') {
-         document.body.classList.remove('light-theme', 'dark-theme');
-         document.body.classList.add(e.matches ? 'dark-theme' : 'light-theme');
-         document.body.classList.toggle('dark-theme', e.matches); // Ensure dark-theme class applies correctly
-    }
+    // --- Initialization ---
+    loadSettings(); // Load settings when the page loads
+    switchTab('chat'); // Start on chat tab
+
 });
+// END OF FILE miniManus-main/static/script.js
