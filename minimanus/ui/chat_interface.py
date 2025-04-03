@@ -1,3 +1,4 @@
+# START OF FILE miniManus-main/minimanus/ui/chat_interface.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -248,32 +249,41 @@ class ChatInterface:
 
     def startup(self) -> None:
         """Start the chat interface."""
+        self.logger.info("ChatInterface startup: STARTING") # ADDED LOG
         if self.sessions_dir is None:
              self.logger.error("Session directory not set before startup. Sessions will not be loaded/saved.")
              # Optionally set a default path here, but it's better if set explicitly
              # self.sessions_dir = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share')) / 'minimanus' / 'data' / 'sessions'
         else:
+             self.logger.info(f"ChatInterface startup: Ensuring sessions dir exists: {self.sessions_dir}") # ADDED LOG
              self.sessions_dir.mkdir(parents=True, exist_ok=True)
+             self.logger.info("ChatInterface startup: Loading sessions...") # ADDED LOG
              self._load_sessions() # Load sessions after directory is ensured
+             self.logger.info("ChatInterface startup: Sessions loaded.") # ADDED LOG
 
         # Create default session if none exists after loading
+        self.logger.info("ChatInterface startup: Checking if session needs creation...") # ADDED LOG
         if not self.sessions:
             self.logger.info("No existing sessions found or loaded. Creating a new default session.")
             default_session = self.create_session("New Chat")
             self.current_session_id = default_session.id
+            self.logger.info(f"ChatInterface startup: Default session created: {self.current_session_id}") # ADDED LOG
         elif not self.current_session_id or self.current_session_id not in self.sessions:
             # Set current session to most recently updated if current ID is invalid
+            self.logger.info("ChatInterface startup: Finding most recent session...") # ADDED LOG
             most_recent_id = max(self.sessions, key=lambda sid: self.sessions[sid].updated_at, default=None)
             if most_recent_id:
                  self.current_session_id = most_recent_id
                  self.logger.info(f"Set current session to most recent: {self.current_session_id}")
             else:
                  # If somehow sessions exist but none are valid, create a new one
+                 self.logger.warning("No valid sessions found after load. Creating a new default session.")
                  default_session = self.create_session("New Chat")
                  self.current_session_id = default_session.id
-                 self.logger.warning("No valid sessions found after load. Created a new default session.")
+                 self.logger.warning(f"ChatInterface startup: Created new default session as fallback: {self.current_session_id}") # ADDED LOG
 
         self.logger.info(f"ChatInterface started. Current session: {self.current_session_id}")
+        self.logger.info("ChatInterface startup: FINISHED") # ADDED LOG
 
 
     def shutdown(self) -> None:
@@ -291,7 +301,9 @@ class ChatInterface:
         loaded_count = 0
         with self._sessions_lock:
             self.sessions.clear() # Clear existing in-memory sessions before loading
+            self.logger.debug(f"ChatInterface _load_sessions: Scanning {self.sessions_dir}...") # ADDED LOG
             for file_path in self.sessions_dir.glob("*.json"):
+                self.logger.debug(f"ChatInterface _load_sessions: Attempting to load {file_path.name}") # ADDED LOG
                 try:
                     with file_path.open("r", encoding="utf-8") as f:
                         session_data = json.load(f)
@@ -311,10 +323,14 @@ class ChatInterface:
             # Load the last used session ID if it exists
             current_session_file = self.sessions_dir / ".current_session"
             if current_session_file.exists():
+                 self.logger.debug(f"ChatInterface _load_sessions: Loading current session ID from {current_session_file}") # ADDED LOG
                  try:
                      last_id = current_session_file.read_text(encoding="utf-8").strip()
                      if last_id in self.sessions:
                          self.current_session_id = last_id
+                         self.logger.debug(f"ChatInterface _load_sessions: Current session set to {last_id}") # ADDED LOG
+                     else:
+                         self.logger.warning(f"ChatInterface _load_sessions: Saved current session ID '{last_id}' not found in loaded sessions.") # ADDED LOG
                  except Exception as e:
                       self.logger.error(f"Error reading current session file: {e}")
 
@@ -328,6 +344,7 @@ class ChatInterface:
         Args:
             session_id: ID of session to save
         """
+        self.logger.debug(f"ChatInterface _save_session: Saving session {session_id}...") # ADDED LOG
         if not self.sessions_dir:
             self.logger.warning("Session directory not set. Cannot save session.")
             return
@@ -340,13 +357,17 @@ class ChatInterface:
 
             file_path = self.sessions_dir / f"{session_id}.json"
             try:
+                self.logger.debug(f"ChatInterface _save_session: Converting session {session_id} to dict...") # ADDED LOG
                 session_dict = session.to_dict()
+                self.logger.debug(f"ChatInterface _save_session: Writing session {session_id} to {file_path}...") # ADDED LOG
                 with file_path.open("w", encoding="utf-8") as f:
                     json.dump(session_dict, f, indent=2, ensure_ascii=False)
                 self.logger.debug(f"Saved session {session_id} to {file_path}")
             except Exception as e:
                 self.logger.error(f"Error saving session {session_id} to {file_path}: {e}", exc_info=True)
                 self.error_handler.handle_error(e, ErrorCategory.STORAGE, ErrorSeverity.ERROR, {"file": str(file_path), "action": "save_session"})
+        self.logger.debug(f"ChatInterface _save_session: Finished saving session {session_id}.") # ADDED LOG
+
 
     def _save_all_sessions(self) -> None:
          """Saves all current sessions and the current session ID."""
@@ -381,6 +402,7 @@ class ChatInterface:
         Returns:
             New chat session
         """
+        self.logger.debug(f"ChatInterface create_session: STARTING creation for title '{title}'") # ADDED LOG
         with self._sessions_lock:
             session = ChatSession(title=title, system_prompt=system_prompt)
             self.sessions[session.id] = session
@@ -388,13 +410,20 @@ class ChatInterface:
 
             # Optionally set as current if none is set
             if self.current_session_id is None:
+                 self.logger.debug(f"ChatInterface create_session: Setting new session {session.id} as current.") # ADDED LOG
                  self.set_current_session(session.id)
 
             if self.auto_save:
+                self.logger.debug(f"ChatInterface create_session: Auto-saving session {session.id}...") # ADDED LOG
                 self._save_session(session.id)
+                self.logger.debug(f"ChatInterface create_session: Auto-save complete for {session.id}.") # ADDED LOG
 
+            self.logger.debug(f"ChatInterface create_session: Publishing event for {session.id}...") # ADDED LOG
             self.event_bus.publish_event("chat.session.created", {"session_id": session.id})
+            self.logger.debug(f"ChatInterface create_session: FINISHED creation for {session.id}.") # ADDED LOG
             return session
+
+    # --- Rest of the methods (get_session, get_all_sessions, delete_session, etc.) remain the same ---
 
     def get_session(self, session_id: str) -> Optional[ChatSession]:
         """
@@ -600,3 +629,4 @@ class ChatInterface:
 
             self.logger.info(f"Cleared history for session {session.id}")
             return True
+# END OF FILE miniManus-main/minimanus/ui/chat_interface.py
