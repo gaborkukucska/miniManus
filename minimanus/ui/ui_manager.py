@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 from enum import Enum, auto
 from pathlib import Path
-from typing import Dict, List, Optional, Any # <<<--- LINE ADDED HERE
+from typing import Dict, List, Optional, Any # Correct import added previously
 
 # Import local modules
 try:
@@ -192,11 +192,17 @@ class UIManager:
 
             def _handle_api_get(self, path: str, parsed_url):
                 """Route GET API requests."""
+                loop = self.ui_manager.get_event_loop() # Get the main loop
+                if not loop or not loop.is_running():
+                    self.logger.error("Event loop not available for async GET handler.")
+                    self.send_error_response(500, "Internal server error: Event loop unavailable")
+                    return
+
                 if path == "/api/settings":
                     self._handle_get_settings()
                 elif path == "/api/models":
-                    # Needs to be async to call model interface
-                    asyncio.run_coroutine_threadsafe(self._handle_get_models(parsed_url), self.ui_manager.get_event_loop())
+                    # Run async handler in the main loop
+                    asyncio.run_coroutine_threadsafe(self._handle_get_models(parsed_url), loop)
                 elif path == "/api/sessions":
                     self._handle_get_sessions()
                 else:
@@ -240,7 +246,12 @@ class UIManager:
                 except Exception as e:
                     # Catch errors within the async handler
                     self.logger.error(f"Async error handling GET /api/models: {e}", exc_info=True)
-                    self.send_error_response(500, "Internal server error processing models request.")
+                    # Ensure response is sent even on internal errors
+                    # Need to be careful here, headers might already be sent by underlying library on socket errors
+                    try:
+                        self.send_error_response(500, "Internal server error processing models request.")
+                    except: # Catch potential errors sending the error response itself
+                         self.logger.error("Failed to send error response for GET /api/models.")
 
 
             def _handle_get_sessions(self):
@@ -257,14 +268,18 @@ class UIManager:
             # --- POST Handlers ---
             def do_POST(self):
                 """Handle POST requests."""
+                loop = self.ui_manager.get_event_loop() # Get the main loop
+                if not loop or not loop.is_running():
+                    self.logger.error("Event loop not available for async POST handler.")
+                    self.send_error_response(500, "Internal server error: Event loop unavailable")
+                    return
+
                 try:
                     parsed_url = urlparse(self.path)
                     path = parsed_url.path
 
                     content_length = int(self.headers.get("Content-Length", 0))
                     if content_length == 0:
-                         # Allow empty body for some actions if needed later
-                         # self.send_error_response(400, "Request body is empty")
                          body_raw = ""
                          body = {} # Assume empty dict if body is missing
                     else:
@@ -276,26 +291,34 @@ class UIManager:
                             return
 
                     if path == "/api/settings":
-                        self._handle_post_settings(body)
+                        self._handle_post_settings(body) # Keep settings save synchronous for now
                     elif path == "/api/chat":
-                        self._handle_post_chat(body)
-                    elif path == "/api/discover_models": # Added endpoint
-                         asyncio.run_coroutine_threadsafe(self._handle_discover_models(), self.ui_manager.get_event_loop())
-                    # Add other POST endpoints as needed (e.g., creating sessions)
+                        self._handle_post_chat(body) # This uses run_coroutine_threadsafe
+                    elif path == "/api/discover_models":
+                         # Run async handler in the main loop
+                         asyncio.run_coroutine_threadsafe(self._handle_discover_models(), loop)
+                    # Add other POST endpoints as needed
                     else:
                         self.send_error_response(404, "API endpoint not found")
 
                 except Exception as e:
                     self.logger.error(f"POST request error for {self.path}: {e}", exc_info=True)
                     self.error_handler.handle_error(e, ErrorCategory.UI, ErrorSeverity.ERROR, {"path": self.path, "method": "POST"})
-                    self.send_error_response(500, "Internal Server Error", str(e))
+                    try:
+                        self.send_error_response(500, "Internal Server Error", str(e))
+                    except:
+                         self.logger.error("Failed to send error response for POST request.")
+
 
             def _handle_post_settings(self, body):
                 """Handle POST /api/settings."""
+                # *** ADDED DETAILED LOGGING HERE ***
+                self.logger.info("Received POST /api/settings request.")
                 try:
                     # Separate API keys from regular settings
                     api_keys_to_set = {}
                     regular_settings = {}
+                    self.logger.debug(f"Processing settings body: {body}")
 
                     for key, value in body.items():
                         # Check for API key patterns (more robust check might be needed)
@@ -309,7 +332,6 @@ class UIManager:
 
                         if is_api_key_field and isinstance(value, str):
                             # Extract provider name
-                            # Example key formats: "openrouter-api-key", "api.openrouter.api_key"
                             provider_name = None
                             if key.startswith("api.") and key.endswith(".api_key"):
                                 parts = key.split('.')
@@ -327,33 +349,43 @@ class UIManager:
                            regular_settings[key] = value
 
                     # Update regular settings
+                    self.logger.debug(f"Updating regular settings: {regular_settings.keys()}")
                     for key, value in regular_settings.items():
-                        # Add validation logic here if necessary
-                        self.config_manager.set_config(key, value) # set_config already saves
+                        if not self.config_manager.set_config(key, value): # set_config returns bool
+                            self.logger.error(f"Failed to set regular setting: {key}")
+                            # Decide how to handle partial failure
+                    self.logger.debug("Finished updating regular settings.")
 
                     # Update API keys (secrets)
                     keys_saved = True
+                    self.logger.debug(f"Updating API keys for providers: {api_keys_to_set.keys()}")
                     for provider, key_value in api_keys_to_set.items():
                         if not self.config_manager.set_api_key(provider, key_value):
                             keys_saved = False
                             self.logger.error(f"Failed to save API key for {provider}")
-                            # Decide if this should be a partial failure or full failure
+                    self.logger.debug("Finished updating API keys.")
 
                     if not keys_saved:
-                        # Potentially send a specific error if key saving failed
+                         self.logger.warning("Failed to save one or more API keys.") # Log before sending error
                          self.send_error_response(500, "Failed to save one or more API keys")
                          return
 
                     # Publish a general settings updated event
                     self.ui_manager.event_bus.publish_event("settings.updated", {"keys_updated": list(regular_settings.keys()) + list(api_keys_to_set.keys())})
 
+                    # *** Add log right before sending response ***
+                    self.logger.info("Settings update processed successfully. Sending success response.")
                     self.send_json_response(200, {"status": "success", "message": "Settings updated"})
-                    self.logger.info("Settings updated via API")
+                    self.logger.info("Settings updated via API (response sent).") # Log after sending
 
                 except Exception as e:
-                    self.logger.error(f"Error updating settings: {e}", exc_info=True)
-                    self.send_error_response(500, "Failed to update settings", str(e))
-
+                    # Log the specific exception *before* sending error response
+                    self.logger.error(f"Error processing POST /api/settings: {e}", exc_info=True)
+                    try:
+                         self.send_error_response(500, "Failed to update settings", str(e))
+                    except:
+                         self.logger.error("Failed to send error response for POST /api/settings.")
+                # *** END OF ADDED LOGGING ***
 
             def _handle_post_chat(self, body):
                 """Handle POST /api/chat."""
@@ -399,7 +431,11 @@ class UIManager:
                      self.send_json_response(200, {"status": "success", "message": "Model discovery initiated."})
                  except Exception as e:
                      self.logger.error(f"Error initiating model discovery: {e}", exc_info=True)
-                     self.send_error_response(500, "Failed to start model discovery", str(e))
+                     # Ensure response is sent even on internal errors
+                     try:
+                          self.send_error_response(500, "Failed to start model discovery", str(e))
+                     except:
+                          self.logger.error("Failed to send error response for POST /api/discover_models.")
 
 
             # --- Static File Serving ---
