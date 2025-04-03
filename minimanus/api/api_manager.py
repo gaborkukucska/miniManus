@@ -1,3 +1,4 @@
+# START OF FILE miniManus-main/minimanus/api/api_manager.py
 import os
 import sys
 import time
@@ -283,11 +284,11 @@ class APIManager:
         if default_provider_name:
             try:
                 default_provider = APIProvider[default_provider_name.upper()]
-                if await self.check_provider_availability(default_provider):
+                if default_provider != preferred_provider and await self.check_provider_availability(default_provider): # Avoid re-checking preferred
                      # Optional: Add check if provider supports the request_type
                      self.logger.debug(f"Selected default provider from config: {default_provider.name}")
                      return default_provider
-                else:
+                elif default_provider != preferred_provider:
                      self.logger.debug(f"Default provider {default_provider.name} is not available.")
             except KeyError:
                 self.logger.warning(f"Default provider name '{default_provider_name}' in config is invalid.")
@@ -295,14 +296,16 @@ class APIManager:
         # 3. Fallback: Iterate through all available providers and return the first one
         #    (Could add more sophisticated logic here, e.g., based on cost, capability)
         available_providers = await self.get_available_providers()
-        if available_providers:
-             # Optional: Add check if provider supports the request_type
-             selected = available_providers[0]
-             self.logger.debug(f"Selected first available provider as fallback: {selected.name}")
-             return selected
-        else:
-             self.logger.error("No API providers available for the request.")
-             return None
+        for provider in available_providers:
+            # Don't re-select the preferred or default if they were already checked and unavailable
+            if provider != preferred_provider and provider.name.lower() != default_provider_name:
+                 # Optional: Add check if provider supports the request_type
+                 self.logger.debug(f"Selected first available provider as fallback: {provider.name}")
+                 return provider
+
+        # If only preferred/default were available and failed, or none were available
+        self.logger.error("No API providers available for the request.")
+        return None
 
     async def send_request(self, request_type: APIRequestType,
                       request_data: Dict[str, Any],
@@ -313,6 +316,7 @@ class APIManager:
         Args:
             request_type: The type of request (e.g., CHAT, EMBEDDING).
             request_data: The data payload for the request (e.g., messages, prompt).
+                          This dictionary *may* be modified by this method.
             preferred_provider: An optional specific provider to try first.
 
         Returns:
@@ -330,6 +334,38 @@ class APIManager:
             error_msg = f"Adapter not found for selected provider: {selected_provider.name}"
             self.error_handler.handle_error(RuntimeError(error_msg), ErrorCategory.SYSTEM, ErrorSeverity.ERROR, {"provider": selected_provider.name})
             return {"error": error_msg}
+
+        # *** START MODIFICATION ***
+        # Ensure the model is set in request_data before sending to adapter
+        # Use model from request_data if present, otherwise use adapter's default
+        # Define model_key based on request type (embedding needs different default)
+        model_key_in_request = "model" # Default key
+        default_model_attr = "default_model" # Default attribute name in adapter
+        if request_type == APIRequestType.EMBEDDING:
+             # Use embedding specific default if adapter has it
+             if hasattr(adapter, "default_embedding_model"):
+                 default_model_attr = "default_embedding_model"
+
+        # Get the effective model name
+        effective_model_name = request_data.get(model_key_in_request)
+        if not effective_model_name:
+             if hasattr(adapter, default_model_attr):
+                 effective_model_name = getattr(adapter, default_model_attr)
+                 self.logger.debug(f"Using default model '{effective_model_name}' for {selected_provider.name}/{request_type.name}")
+             else:
+                 self.logger.warning(f"No model specified in request and no default model found in adapter for {selected_provider.name}/{request_type.name}")
+                 # Adapter will need to handle this (e.g., error or final fallback)
+
+        # Inject the effective model name into request_data if it was determined
+        if effective_model_name:
+            request_data[model_key_in_request] = effective_model_name
+        elif model_key_in_request in request_data:
+             # If model was explicitly None or empty in original request, remove it
+             # to avoid sending invalid value to adapter/API
+             del request_data[model_key_in_request]
+
+        # *** END MODIFICATION ***
+
 
         # --- Caching Logic ---
         cache_key = self._generate_cache_key(selected_provider, request_type, request_data)
@@ -363,18 +399,25 @@ class APIManager:
 
         # --- Execute Request ---
         try:
-            self.logger.info(f"Sending {request_type.name} request to {selected_provider.name}...")
+            self.logger.info(f"Sending {request_type.name} request to {selected_provider.name} (Model: {request_data.get('model', 'N/A')})...")
             api_method = getattr(adapter, method_name)
-            response = await api_method(request_data)
+            response = await api_method(request_data) # Pass potentially modified request_data
 
             # --- Caching Response ---
             if self.cache_enabled and cache_key and "error" not in response:
                 async with self._cache_lock:
                      # Evict oldest item if cache is full
                      if len(self.cache) >= self.max_cache_size:
-                         oldest_key = min(self.cache, key=lambda k: self.cache[k][0])
-                         del self.cache[oldest_key]
-                         self.logger.debug(f"Cache full, evicted oldest key: {oldest_key}")
+                         # Find the oldest key based on timestamp
+                         oldest_key = None
+                         min_time = float('inf')
+                         for key, (timestamp, _) in self.cache.items():
+                              if timestamp < min_time:
+                                  min_time = timestamp
+                                  oldest_key = key
+                         if oldest_key:
+                              del self.cache[oldest_key]
+                              self.logger.debug(f"Cache full, evicted oldest key: {oldest_key}")
                      # Store new response
                      self.cache[cache_key] = (time.time(), response)
                      self.logger.debug(f"Cached response for key: {cache_key}")
@@ -418,5 +461,9 @@ class APIManager:
                 ]
                 if expired_keys:
                      for key in expired_keys:
-                         del self.cache[key]
+                         # Check if key still exists before deleting (might have been removed concurrently)
+                         if key in self.cache:
+                              del self.cache[key]
                      self.logger.info(f"Cleaned up {len(expired_keys)} expired cache items.")
+
+# END OF FILE miniManus-main/minimanus/api/api_manager.py
