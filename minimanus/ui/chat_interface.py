@@ -102,57 +102,26 @@ class ChatSession:
         self.updated_at = time.time()
 
     def get_history_for_llm(self, max_messages: Optional[int] = None) -> List[Dict[str, str]]:
-        """
-        Formats message history for sending to an LLM (OpenAI format).
-
-        Args:
-            max_messages: Maximum number of recent messages to include.
-
-        Returns:
-            List of message dictionaries.
-        """
+        """Formats message history for sending to an LLM (OpenAI format)."""
         history = []
         if self.system_prompt:
             history.append({"role": "system", "content": self.system_prompt})
 
         messages_to_include = self.messages
         if max_messages is not None and len(messages_to_include) > max_messages:
-             # Preserve the first system message if any, take last N-1 user/assistant messages
-             system_indices = [i for i, msg in enumerate(self.messages) if msg.role == MessageRole.SYSTEM]
-             num_system = len(system_indices)
-             num_other = len(self.messages) - num_system
-             num_other_to_keep = max(0, max_messages - num_system)
-
-             messages_to_include = []
-             system_kept = 0
-             other_kept = 0
-             for i, msg in reversed(list(enumerate(self.messages))):
-                 if msg.role == MessageRole.SYSTEM:
-                     if system_kept < num_system: # Keep all original system messages if possible within limit
-                         messages_to_include.append(msg)
-                         system_kept += 1
-                 elif other_kept < num_other_to_keep:
-                     messages_to_include.append(msg)
-                     other_kept += 1
-
-                 if system_kept + other_kept >= max_messages:
-                     break
-             messages_to_include.reverse() # Put back in chronological order
-
+             # Simple truncation for now, preserving system prompt is complex
+             messages_to_include = self.messages[-max_messages:] # Keep last N messages
 
         for msg in messages_to_include:
-            # Skip system message if already added via system_prompt attribute
             if msg.role == MessageRole.SYSTEM and self.system_prompt:
-                continue
+                continue # Skip if system prompt is handled separately
             msg_dict = {"role": msg.role.value, "content": msg.content}
-            # Include tool info if present
             if msg.tool_calls:
                 msg_dict['tool_calls'] = msg.tool_calls
             if msg.tool_call_id:
                 msg_dict['tool_call_id'] = msg.tool_call_id
             history.append(msg_dict)
         return history
-
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert session to dictionary for saving."""
@@ -163,7 +132,7 @@ class ChatSession:
             "updated_at": self.updated_at,
             "messages": [msg.to_dict() for msg in self.messages],
             "system_prompt": self.system_prompt,
-            "selected_model": self.selected_model # Save selected model
+            "selected_model": self.selected_model
         }
 
     @classmethod
@@ -175,9 +144,8 @@ class ChatSession:
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),
             system_prompt=data.get("system_prompt"),
-            selected_model=data.get("selected_model") # Load selected model
+            selected_model=data.get("selected_model") # Load may be None initially
         )
-        # Handle potential errors during message deserialization individually
         messages = []
         for msg_data in data.get("messages", []):
             try:
@@ -190,101 +158,111 @@ class ChatSession:
 class ChatInterface:
     """
     ChatInterface manages chat sessions and interactions with the user.
-
-    It handles:
-    - Chat session creation and management
-    - Message processing and routing via the AgentSystem
-    - Persistence of chat sessions
     """
-
-    _instance = None  # Singleton instance
+    _instance = None
 
     @classmethod
     def get_instance(cls) -> 'ChatInterface':
-        """Get or create the singleton instance of ChatInterface."""
         if cls._instance is None:
             cls._instance = ChatInterface()
         return cls._instance
 
     def __init__(self):
-        """Initialize the ChatInterface."""
         if ChatInterface._instance is not None:
-            raise RuntimeError("ChatInterface is a singleton. Use get_instance() instead.")
-
+            raise RuntimeError("ChatInterface is a singleton.")
         self.logger = logger
         self.event_bus = EventBus.get_instance()
         self.error_handler = ErrorHandler.get_instance()
         self.config_manager = ConfigurationManager.get_instance()
-        self.agent_system = AgentSystem.get_instance() # Get the AgentSystem instance
-
-        # Chat sessions
+        self.agent_system = AgentSystem.get_instance()
         self.sessions: Dict[str, ChatSession] = {}
         self.current_session_id: Optional[str] = None
-        self._sessions_lock = threading.Lock() # Lock for session operations
-
-        # Session storage directory - needs to be set by caller (e.g., __main__.py)
+        self._sessions_lock = threading.Lock()
         self.sessions_dir: Optional[Path] = None
-
-        # Settings read from config manager
         self.max_history_for_llm = self.config_manager.get_config("chat.max_history_for_llm", 20)
         self.auto_save = self.config_manager.get_config("chat.auto_save", True)
-
         self.logger.info("ChatInterface initialized")
 
-    def startup(self) -> None:
-        """Start the chat interface."""
-        self.logger.info("ChatInterface startup: STARTING")
-        if self.sessions_dir is None:
-             self.logger.error("Session directory not set before startup. Sessions will not be loaded/saved.")
-        else:
-             self.logger.info(f"ChatInterface startup: Ensuring sessions dir exists: {self.sessions_dir}")
-             try:
-                 self.sessions_dir.mkdir(parents=True, exist_ok=True)
-             except OSError as e:
-                  self.logger.error(f"ChatInterface startup: Failed to create sessions directory {self.sessions_dir}: {e}", exc_info=True)
-                  self.error_handler.handle_error(e, ErrorCategory.STORAGE, ErrorSeverity.ERROR, {"action": "ensure_sessions_dir"})
-                  self.logger.warning("ChatInterface startup: Continuing without session persistence due to directory error.")
-                  self.sessions_dir = None
-                  self.auto_save = False
-             else:
-                 self.logger.info("ChatInterface startup: Loading sessions...")
-                 self._load_sessions()
-                 self.logger.info("ChatInterface startup: Sessions loaded.")
+    def _get_default_model_from_config(self) -> Optional[str]:
+        """Gets the default model ID based on the default provider configuration."""
+        try:
+            default_provider = self.config_manager.get_config("api.default_provider", "openrouter")
+            model_id = self.config_manager.get_config(f"api.providers.{default_provider}.default_model")
+            if model_id:
+                 self.logger.debug(f"Determined default model from config: '{model_id}' (Provider: {default_provider})")
+                 return model_id
+            else:
+                 self.logger.warning(f"Default model not configured for default provider '{default_provider}'.")
+                 return None
+        except Exception as e:
+            self.logger.error(f"Error getting default model from config: {e}", exc_info=True)
+            return None
 
-        self.logger.info("ChatInterface startup: Checking if session needs creation...")
-        if not self.sessions:
-            self.logger.info("No existing sessions found or loaded. Creating a new default session.")
+
+    def startup(self) -> None:
+        """Start the chat interface, load sessions, ensure current session and model exist."""
+        self.logger.info("ChatInterface startup: STARTING")
+        # --- Ensure sessions dir exists ---
+        if self.sessions_dir:
+            self.logger.info(f"ChatInterface startup: Ensuring sessions dir exists: {self.sessions_dir}")
             try:
-                default_session = self.create_session("New Chat") # Creates with default model
-                if default_session:
-                    self.current_session_id = default_session.id
-                    self.logger.info(f"ChatInterface startup: Default session created: {self.current_session_id}")
-                else:
-                    self.logger.error("ChatInterface startup: Failed to create default session.")
-            except Exception as e:
-                self.logger.critical("ChatInterface startup: CRITICAL ERROR during default session creation.", exc_info=True)
+                self.sessions_dir.mkdir(parents=True, exist_ok=True)
+                self._load_sessions() # Load existing sessions
+                self.logger.info("ChatInterface startup: Sessions loaded.")
+            except OSError as e:
+                self.logger.error(f"ChatInterface startup: Failed to create/access sessions directory {self.sessions_dir}: {e}", exc_info=True)
+                self.error_handler.handle_error(e, ErrorCategory.STORAGE, ErrorSeverity.ERROR, {"action": "ensure_sessions_dir"})
+                self.logger.warning("ChatInterface startup: Continuing without session persistence.")
+                self.sessions_dir = None
+                self.auto_save = False
+        else:
+            self.logger.error("Session directory not set before startup. Sessions will not be loaded/saved.")
+            self.auto_save = False
+
+        self.logger.info("ChatInterface startup: Ensuring a valid session exists...")
+        # --- Ensure a session exists and is selected ---
+        if not self.sessions:
+            self.logger.info("No sessions loaded. Creating a new default session.")
+            default_session = self.create_session("New Chat") # Creates with default model logic
+            if default_session:
+                self.current_session_id = default_session.id
+                self.logger.info(f"ChatInterface startup: Default session created: {self.current_session_id}")
+            else:
+                self.logger.error("ChatInterface startup: CRITICAL - Failed to create initial default session.")
+                # Handle critical failure? For now, log and continue, chat might not work.
+                self.current_session_id = None
         elif not self.current_session_id or self.current_session_id not in self.sessions:
-            self.logger.info("ChatInterface startup: No current session ID set or invalid. Finding most recent...")
+            self.logger.info("ChatInterface startup: No current session ID set or invalid. Selecting most recent.")
             most_recent_id = max(self.sessions, key=lambda sid: self.sessions[sid].updated_at, default=None)
             if most_recent_id:
-                 self.current_session_id = most_recent_id
-                 self.logger.info(f"Set current session to most recent: {self.current_session_id}")
-                 self._save_current_session_id()
-            else:
-                 self.logger.warning("No valid sessions found after load. Creating a new default session.")
-                 try:
-                     default_session = self.create_session("New Chat")
-                     if default_session:
-                         self.current_session_id = default_session.id
-                         self.logger.warning(f"ChatInterface startup: Created new default session as fallback: {self.current_session_id}")
-                     else:
-                         self.logger.error("ChatInterface startup: Failed to create fallback default session.")
-                 except Exception as e:
-                     self.logger.critical("ChatInterface startup: CRITICAL ERROR during fallback session creation.", exc_info=True)
+                self.current_session_id = most_recent_id
+                self.logger.info(f"Set current session to most recent: {self.current_session_id}")
+                self._save_current_session_id()
+            else: # Should not happen if sessions exist, but handle defensively
+                self.logger.warning("No valid sessions found. Creating a new default session as fallback.")
+                fallback_session = self.create_session("New Chat")
+                if fallback_session:
+                    self.current_session_id = fallback_session.id
+                else:
+                    self.logger.error("ChatInterface startup: CRITICAL - Failed to create fallback default session.")
+                    self.current_session_id = None
+
+        # --- Ensure the current session has a selected model ---
+        if self.current_session_id:
+            current_session = self.get_session(self.current_session_id)
+            if current_session and current_session.selected_model is None:
+                self.logger.warning(f"Current session {self.current_session_id} has no selected model. Assigning default.")
+                default_model = self._get_default_model_from_config()
+                if default_model:
+                     self.update_session_model(self.current_session_id, default_model)
+                else:
+                     self.logger.error(f"Could not assign default model to session {self.current_session_id}.")
 
         self.logger.info(f"ChatInterface started. Current session: {self.current_session_id}")
         self.logger.info("ChatInterface startup: FINISHED")
 
+    # ... (shutdown, _load_sessions, _load_current_session_id, _save_current_session_id, _save_session, _save_all_sessions) ...
+    # These remain the same as the previous correct version
 
     def shutdown(self) -> None:
         """Shut down the chat interface."""
@@ -333,13 +311,16 @@ class ChatInterface:
              self.logger.debug(f"ChatInterface: Loading current session ID from {current_session_file}")
              try:
                  last_id = current_session_file.read_text(encoding="utf-8").strip()
+                 # Verify the loaded ID actually exists in the sessions dict before setting
                  if last_id in self.sessions:
                      self.current_session_id = last_id
                      self.logger.debug(f"ChatInterface: Current session set to {last_id}")
                  else:
-                     self.logger.warning(f"ChatInterface: Saved current session ID '{last_id}' not found in loaded sessions.")
+                     self.logger.warning(f"ChatInterface: Saved current session ID '{last_id}' not found in loaded sessions. Will select most recent.")
+                     self.current_session_id = None # Force selection of most recent later
              except Exception as e:
                   self.logger.error(f"Error reading current session file: {e}", exc_info=True)
+
 
     def _save_current_session_id(self) -> bool:
         """Saves the current session ID to the .current_session file."""
@@ -348,6 +329,14 @@ class ChatInterface:
             return False
         if not self.current_session_id:
              self.logger.warning("Cannot save current session ID: current_session_id is None.")
+             # Optionally delete the file if current session is None
+             current_session_file = self.sessions_dir / ".current_session"
+             if current_session_file.exists():
+                 try:
+                     current_session_file.unlink()
+                     self.logger.debug("Removed .current_session file as current session ID is None.")
+                 except OSError as e:
+                     self.logger.error(f"Error removing .current_session file: {e}")
              return False
 
         current_session_file = self.sessions_dir / ".current_session"
@@ -426,31 +415,20 @@ class ChatInterface:
 
     def create_session(self, title: str = "New Chat", system_prompt: Optional[str] = None, model_id: Optional[str] = None) -> Optional[ChatSession]:
         """
-        Create a new chat session. Returns the session on success, None on failure.
-        Optionally sets the initial model ID.
+        Create a new chat session. Assigns a default model if not provided.
+        Returns the session on success, None on failure.
         """
         self.logger.debug(f"ChatInterface create_session: STARTING creation for title '{title}'")
         session_saved = False
         session = None
 
-        # Determine default model if not provided
+        # Determine model if not provided
         if not model_id:
-             default_provider = self.config_manager.get_config("api.default_provider", "openrouter")
-             # Ensure provider specific settings exist before accessing default_model
-             provider_settings = self.config_manager.get_config(f"api.providers.{default_provider}")
-             if provider_settings:
-                 model_id = provider_settings.get("default_model")
-                 if model_id:
-                     self.logger.debug(f"Using default model '{model_id}' for new session from provider '{default_provider}'.")
-                 else:
-                     self.logger.warning(f"Default model not found for default provider '{default_provider}'.")
-             else:
-                 self.logger.warning(f"Configuration for default provider '{default_provider}' not found.")
-             # Final fallback if no default model found
+             model_id = self._get_default_model_from_config()
+             # Handle case where even the default couldn't be determined
              if not model_id:
-                  model_id = "openai/gpt-3.5-turbo" # Or some other absolute fallback
-                  self.logger.warning(f"Using absolute fallback model '{model_id}' for new session.")
-
+                  self.logger.error("Failed to determine a default model for new session. Cannot create session.")
+                  return None # Cannot create without a model
 
         try:
             with self._sessions_lock:
@@ -462,6 +440,7 @@ class ChatInterface:
                      self.current_session_id = session.id
                      self.logger.debug(f"ChatInterface create_session: Set new session {session.id} as current (in memory).")
 
+            # Perform saving operations outside the main lock
             if self.auto_save:
                 self.logger.debug(f"ChatInterface create_session: Auto-saving session {session.id}...")
                 session_saved = self._save_session(session.id)
@@ -490,15 +469,32 @@ class ChatInterface:
              return None
 
     def get_session(self, session_id: str) -> Optional[ChatSession]:
-        """Get a chat session by ID."""
+        """
+        Get a chat session by ID. Ensures the session has a selected_model assigned.
+        """
         with self._sessions_lock:
-            return self.sessions.get(session_id)
+            session = self.sessions.get(session_id)
+            # Ensure session has a model assigned if accessed
+            if session and session.selected_model is None:
+                 self.logger.warning(f"Session {session_id} retrieved without a selected model. Assigning default.")
+                 default_model = self._get_default_model_from_config()
+                 if default_model:
+                     session.selected_model = default_model
+                     # Mark as updated? Might trigger unnecessary saves if not careful
+                     # session.updated_at = time.time()
+                 else:
+                     self.logger.error(f"Could not assign default model to session {session_id} during get.")
+            return session
 
     def get_all_sessions(self) -> List[ChatSession]:
         """Get all chat sessions, sorted by last updated time (newest first)."""
         with self._sessions_lock:
-            # Make a copy of the values before sorting to avoid holding lock during sort
             sessions_list = list(self.sessions.values())
+        # Ensure all sessions have a model before returning (could be done in get_session too)
+        default_model = self._get_default_model_from_config()
+        for session in sessions_list:
+            if session.selected_model is None:
+                 session.selected_model = default_model
         return sorted(sessions_list, key=lambda s: s.updated_at, reverse=True)
 
     def delete_session(self, session_id: str) -> bool:
@@ -513,7 +509,6 @@ class ChatInterface:
                 del self.sessions[session_id]
                 self.logger.info(f"Deleted chat session from memory: {session_id}")
 
-                # Delete session file
                 if self.sessions_dir:
                     file_path = self.sessions_dir / f"{session_id}.json"
                     try:
@@ -524,23 +519,20 @@ class ChatInterface:
                         self.logger.error(f"Error deleting session file {file_path}: {e}", exc_info=True)
                         self.error_handler.handle_error(e, ErrorCategory.STORAGE, ErrorSeverity.WARNING, {"file": str(file_path), "action": "delete_session_file"})
 
-                # Update current session if needed
                 if self.current_session_id == session_id:
                     most_recent_id = max(self.sessions, key=lambda sid: self.sessions[sid].updated_at, default=None)
                     self.current_session_id = most_recent_id
-                    new_current_id = most_recent_id # Store ID to save outside lock
+                    new_current_id = most_recent_id
                     if self.current_session_id:
                         self.logger.info(f"Current session changed to {self.current_session_id} after deletion.")
                     else:
-                        self.logger.info("No sessions left after deletion.")
+                        self.logger.info("No sessions left after deletion. Will create new one on next message.")
             else:
                 self.logger.warning(f"Attempted to delete non-existent session: {session_id}")
                 return False
 
-        # Perform actions outside lock
         if session_existed:
-             if new_current_id is not None:
-                 self._save_current_session_id()
+             self._save_current_session_id() # Save potentially changed current ID
              self.event_bus.publish_event("chat.session.deleted", {"session_id": session_id})
 
         return True
@@ -548,79 +540,64 @@ class ChatInterface:
 
     def set_current_session(self, session_id: str) -> bool:
         """Set the current chat session."""
-        session_exists = False
-        with self._sessions_lock:
-            session_exists = session_id in self.sessions
-
-        if not session_exists:
+        session = self.get_session(session_id) # Use getter which ensures model is set
+        if not session:
             self.logger.warning(f"Attempted to set current session to non-existent ID: {session_id}")
             return False
 
         if self.current_session_id != session_id:
              self.current_session_id = session_id
              self.logger.info(f"Current session set to: {session_id}")
-             # Save the new current session ID outside lock
              if not self._save_current_session_id():
                  self.logger.error("Failed to save updated current session ID.")
-             # Publish event after setting and potentially saving
              self.event_bus.publish_event("chat.session.selected", {"session_id": session_id})
         return True
 
     async def process_message(self, message_text: str, session_id: Optional[str] = None) -> str:
         """Process a user message using the AgentSystem and the session's selected model."""
         target_session_id = session_id if session_id is not None else self.current_session_id
-        session = None
-        if target_session_id:
-             session = self.get_session(target_session_id)
+        session = self.get_session(target_session_id) # Use getter to ensure session exists and has model
 
         if session is None:
             self.logger.warning(f"No valid session ID ({target_session_id}). Creating new session.")
             try:
-                session = self.create_session() # Creates with default model
+                session = self.create_session() # Creates with default model logic
                 if not session:
                      return "Error: Could not create a new chat session."
                 target_session_id = session.id
-                self.set_current_session(target_session_id)
+                self.set_current_session(target_session_id) # This sets current_session_id
             except Exception as e:
                  self.logger.error(f"Failed to create session in process_message: {e}", exc_info=True)
                  return "Error: Failed to establish a chat session."
 
-        # --- Add User Message ---
+        # Add User Message
         user_message = ChatMessage(role=MessageRole.USER, content=message_text)
-        # Lock needed if add_message modifies shared state beyond appending
-        # For now, assume simple append and timestamp update is atomic enough for GIL
-        # If more complex state updates needed, use lock or pass data to a dedicated update task
         session.add_message(user_message)
         self.event_bus.publish_event("chat.message.added", {"session_id": session.id, "message": user_message.to_dict()})
+        if self.auto_save: self._save_session(session.id)
 
-        # Save session after adding user message (outside lock potentially)
-        if self.auto_save:
-            if not self._save_session(session.id):
-                self.logger.warning(f"Failed to auto-save session {session.id} after adding user message.")
-
+        # Log with model info
         self.logger.info(f"Processing message for session {session.id} (Model: {session.selected_model}): '{message_text[:50]}...'")
 
         try:
-            # Get history and model JUST BEFORE calling agent
             history = session.get_history_for_llm(max_messages=self.max_history_for_llm)
-            session_model_id = session.selected_model
+            session_model_id = session.selected_model # Get model guaranteed by get_session
+
+            if not session_model_id: # Should not happen if startup/get logic is correct
+                self.logger.error(f"Session {session.id} still has no model ID before calling agent!")
+                return "Error: Internal configuration error - session has no model assigned."
 
             response_text = await self.agent_system.process_user_request(
                 user_message=message_text,
-                conversation_history=history[:-1], # Pass history excluding the latest user msg
-                requested_model_id=session_model_id
+                conversation_history=history[:-1],
+                requested_model_id=session_model_id # Pass the session's model
             )
 
-            # --- Add Assistant Response ---
+            # Add Assistant Response
             assistant_message = ChatMessage(role=MessageRole.ASSISTANT, content=response_text)
-            # Similar lock considerations as user message add
             session.add_message(assistant_message)
             self.event_bus.publish_event("chat.message.added", {"session_id": session.id, "message": assistant_message.to_dict()})
-
-            # Save session after adding assistant message
-            if self.auto_save:
-                 if not self._save_session(session.id):
-                     self.logger.warning(f"Failed to auto-save session {session.id} after adding assistant message.")
+            if self.auto_save: self._save_session(session.id)
 
             self.logger.info(f"Generated response for session {session.id}: '{response_text[:50]}...'")
             return response_text
@@ -628,23 +605,16 @@ class ChatInterface:
         except Exception as e:
             self.logger.error(f"Error processing message in session {session.id}: {e}", exc_info=True)
             self.error_handler.handle_error(e, ErrorCategory.SYSTEM, ErrorSeverity.ERROR, {"session_id": session.id, "action": "process_message"})
-
-            error_response = f"I encountered an error while processing your request. Please try again later. (Error: {type(e).__name__})"
-            # --- Add Error Response ---
+            error_response = f"I encountered an error processing your request: {type(e).__name__}"
+            # Add Error Response
             error_message = ChatMessage(role=MessageRole.ASSISTANT, content=error_response)
-            # Similar lock considerations
             session.add_message(error_message)
             self.event_bus.publish_event("chat.message.added", {"session_id": session.id, "message": error_message.to_dict()})
-
-            if self.auto_save:
-                 if not self._save_session(session.id):
-                     self.logger.warning(f"Failed to auto-save session {session.id} after adding error message.")
-
+            if self.auto_save: self._save_session(session.id)
             return error_response
 
-
     def clear_session_history(self, session_id: Optional[str] = None) -> bool:
-        """Clear chat history for a session, keeping the system prompt."""
+        """Clear chat history for a session, keeping system prompt and model."""
         target_session_id = session_id if session_id is not None else self.current_session_id
         if not target_session_id:
              self.logger.warning("Cannot clear history: No session specified or current.")
@@ -657,8 +627,7 @@ class ChatInterface:
                  self.logger.warning(f"Cannot clear history: Session not found: {target_session_id}")
                  return False
 
-            # Keep only system messages if they exist and system_prompt is not set
-            # If system_prompt is set, history can be fully cleared.
+            # Keep only system messages if system_prompt isn't explicitly set on session
             if session.system_prompt:
                  session.messages = []
             else:
@@ -668,7 +637,6 @@ class ChatInterface:
             session_cleared = True
 
         if session_cleared:
-            # Perform actions outside lock
             self.event_bus.publish_event("chat.session.cleared", {"session_id": target_session_id})
             if self.auto_save:
                 if not self._save_session(target_session_id):
@@ -680,21 +648,23 @@ class ChatInterface:
 
     def update_session_model(self, session_id: str, model_id: str) -> bool:
         """Updates the selected model for a given session."""
+        # Validate model_id format briefly?
+        if not isinstance(model_id, str) or not model_id:
+            self.logger.error(f"Invalid model_id provided for update: {model_id}")
+            return False
+
         session = self.get_session(session_id) # Uses internal lock
         if not session:
              self.logger.warning(f"Cannot update model for non-existent session: {session_id}")
              return False
 
-        # TODO: Add optional model validation here using ModelSelectionInterface if needed
-        # async def check_model(): return await self.model_selection_interface.get_model(model_id)
-        # model_info = asyncio.run(check_model()) # Simple sync wait for validation - consider async API endpoint
-        # if not model_info:
-        #    self.logger.warning(f"Attempted to set invalid model '{model_id}' for session {session_id}")
-        #    return False
+        # Check if model actually changed
+        if session.selected_model == model_id:
+            self.logger.debug(f"Model for session {session_id} is already {model_id}. No update needed.")
+            return True
 
-        # Update session object (lock might be needed if session object state is complex)
-        # For simple attribute update, GIL might suffice, but lock is safer if session grows
-        with self._sessions_lock: # Lock around session modification
+        # Update session object
+        with self._sessions_lock: # Lock needed for modification
             session.selected_model = model_id
             session.updated_at = time.time()
 
@@ -704,7 +674,8 @@ class ChatInterface:
         if self.auto_save:
             if not self._save_session(session_id):
                  self.logger.error(f"Failed to save session {session_id} after model update.")
-                 return False # Indicate save failure?
+                 # Should we revert the change in memory? For now, log and return False
+                 return False
 
         self.event_bus.publish_event("chat.session.model.updated", {"session_id": session_id, "model_id": model_id})
         return True
