@@ -1,3 +1,4 @@
+# START OF FILE miniManus-main/minimanus/__main__.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -43,7 +44,7 @@ except OSError as e:
 # Note: Log level might be adjusted later based on config
 logging.basicConfig(
     level=logging.INFO, # Default level, can be changed by config
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)-8s - %(name)s - %(message)s', # Added level name width
     handlers=[
         logging.StreamHandler(sys.stdout), # Log to console
         logging.FileHandler(LOG_DIR / 'minimanus.log', mode='a') # Log to file
@@ -103,8 +104,10 @@ async def main_async():
         # Adjust log level based on loaded config
         log_level_str = config_manager.get_config("general.log_level", "INFO").upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
-        logging.getLogger("miniManus").setLevel(log_level)
-        for handler in logging.getLogger("miniManus").handlers:
+        # Configure root logger and miniManus logger specifically
+        logging.getLogger().setLevel(log_level) # Set root logger level
+        logging.getLogger("miniManus").setLevel(log_level) # Ensure our logger has the right level
+        for handler in logging.getLogger().handlers: # Apply to all handlers
              handler.setLevel(log_level)
         logger.info(f"Logging level set to {log_level_str}")
 
@@ -132,24 +135,30 @@ async def main_async():
         logger.debug("AgentSystem initialized.")
 
         # UI Layer
-        logger.debug("Initializing ChatInterface...")
+        logger.info("--- Initializing ChatInterface ---")
         chat_interface = ChatInterface.get_instance()
         chat_interface.sessions_dir = DATA_DIR / 'sessions'
-        chat_interface.startup() # Loads sessions
-        logger.debug("ChatInterface initialized and started.")
+        chat_interface.startup() # Loads sessions, potentially creates default
+        logger.info("--- ChatInterface startup() completed ---")
 
-        logger.debug("Initializing ModelSelectionInterface...")
+        # --- ADDED LOGGING ---
+        logger.info("--- Initializing ModelSelectionInterface ---")
         model_selection = ModelSelectionInterface.get_instance()
+        logger.info("--- ModelSelectionInterface instance obtained ---")
         model_selection.startup() # Loads prefs
-        logger.debug("ModelSelectionInterface initialized and started.")
+        logger.info("--- ModelSelectionInterface startup() completed ---")
 
-        logger.debug("Initializing SettingsPanel...")
+        # --- ADDED LOGGING ---
+        logger.info("--- Initializing SettingsPanel ---")
         settings_panel = SettingsPanel.get_instance()
+        logger.info("--- SettingsPanel instance obtained ---")
         settings_panel.startup() # Registers settings definitions
-        logger.debug("SettingsPanel initialized and started.")
+        logger.info("--- SettingsPanel startup() completed ---")
 
-        logger.debug("Initializing UIManager...")
+        # --- ADDED LOGGING ---
+        logger.info("--- Initializing UIManager ---")
         ui_manager = UIManager.get_instance()
+        logger.info("--- UIManager instance obtained ---")
         main_file_dir = Path(__file__).parent
         potential_static_dir = main_file_dir / 'static'
         if potential_static_dir.is_dir():
@@ -158,7 +167,7 @@ async def main_async():
         else:
              logger.warning(f"Static directory not found at {potential_static_dir}, using default: {ui_manager.static_dir}")
         ui_manager.startup() # Starts web server thread
-        logger.debug("UIManager initialized and started.")
+        logger.info("--- UIManager startup() completed (Web server thread started) ---")
 
         # System Manager Registration
         logger.debug("Registering components with SystemManager...")
@@ -196,6 +205,7 @@ async def main_async():
         logger.info("Shutdown requested, exiting main_async loop.")
 
     except Exception as e:
+        # Log with full traceback for any error during startup
         logger.critical(f"Critical error during async startup: {e}", exc_info=True)
         # Ensure shutdown is attempted even if startup fails
         # No need for 'global system_manager' here
@@ -242,13 +252,16 @@ def main():
                 # Allow cancellation to propagate - run loop briefly
                 # Use gather to wait for the task and handle CancelledError
                 logger.debug("Running loop briefly to process cancellation...")
-                loop.run_until_complete(asyncio.gather(main_loop_task, return_exceptions=True))
+                # Increased timeout for cancellation processing
+                loop.run_until_complete(asyncio.wait_for(asyncio.gather(main_loop_task, return_exceptions=True), timeout=5.0))
                 logger.info("Main async task successfully cancelled or finished.")
                 main_task_cancelled = True
             except asyncio.CancelledError:
-                 # This might not be caught here if run_until_complete handles it internally
                  logger.info("Main async task explicitly cancelled.")
                  main_task_cancelled = True
+            except asyncio.TimeoutError:
+                 logger.warning("Timeout waiting for main task cancellation to complete.")
+                 # Proceed with shutdown anyway
             except Exception as e:
                 logger.error(f"Error occurred while awaiting cancelled main task: {e}", exc_info=True)
                 exit_code = 1 # Indicate error during cancellation handling
@@ -260,6 +273,7 @@ def main():
          logger.info("Main loop task was cancelled externally.")
          main_task_cancelled = True
     except Exception as e:
+        # Log critical error with traceback
         logger.critical(f"Unhandled error during main asyncio execution: {e}", exc_info=True)
         exit_code = 1 # Critical error before shutdown initiated
     finally:
@@ -286,15 +300,19 @@ def main():
         try:
             # Cancel any remaining tasks
             tasks = asyncio.all_tasks(loop)
+            # Filter out the main loop task if it's already finished/cancelled
+            tasks = {task for task in tasks if task is not main_loop_task}
+
             if tasks:
                  logger.debug(f"Cancelling {len(tasks)} remaining asyncio tasks...")
                  for task in tasks:
                      task.cancel()
                  # Give cancelled tasks a moment to finish
+                 # Use return_exceptions=True to prevent gather from stopping on first CancelledError
                  loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
                  logger.debug("Remaining tasks cancelled.")
 
-            # Stop the loop if running
+            # Stop the loop if running (needed before closing)
             if loop.is_running():
                 logger.debug("Stopping event loop...")
                 loop.stop()
@@ -317,3 +335,4 @@ def main():
 # Entry point
 if __name__ == "__main__":
     main()
+# END OF FILE miniManus-main/minimanus/__main__.py
