@@ -29,7 +29,6 @@ except ImportError as e:
     logging.getLogger("miniManus.SettingsPanel").critical(f"Failed to import required modules: {e}", exc_info=True)
     if __name__ == "__main__":
         print("ImportError occurred, defining dummy classes for direct test.")
-        # Define necessary dummy classes... (similar to previous version)
         class DummyEnum: pass
         class EventPriority(DummyEnum): NORMAL=1
         class ErrorCategory(DummyEnum): SYSTEM=1; STORAGE=2; UI=3
@@ -64,10 +63,7 @@ except ImportError as e:
                      for part in parts: val = val[part]
                      return val
                  except (KeyError, TypeError):
-                     # Fallback to trying to get default from Setting definition if possible
-                     # This requires SettingsPanel instance to be available, tricky for standalone
-                     # For simplicity, just return the original default passed in
-                     return default
+                     return default # Simplified fallback for test
              def set_config(self, key, value): print(f"DummyConfigManager: Set {key}={value}"); return True
              def get_api_key(self, provider): return None
              def set_api_key(self, provider, key): print(f"DummyConfigManager: Set API Key for {provider}"); return True
@@ -269,30 +265,29 @@ class SettingsPanel:
         self.logger.debug(f"Internal handler: Setting changed - {key} = {value}")
 
 
-    # --- Restored Explicit Settings Registration ---
+    # --- Meticulously Recreated Explicit Settings Registration ---
     def _register_default_settings(self) -> None:
-        """Register default settings explicitly."""
-        self.settings.clear() # Clear any previous registrations
+        """Register default settings explicitly based on ConfigManager defaults."""
+        self.settings.clear()
         self.sections.clear()
 
-        # Define sections
+        # Define sections first (order matters for UI)
         self.register_section("general", "General", "General application settings", order=0)
         self.register_section("ui", "Appearance", "User interface settings", order=1)
         self.register_section("chat", "Chat", "Chat behavior settings", order=2)
         self.register_section("api", "API Configuration", "LLM Provider settings", order=3)
-        # Provider sections will be added dynamically below
-        self.register_section("agent", "Agent", "Agent behavior settings", order=4)
-        self.register_section("resources", "Resources", "Resource monitoring", order=5)
+        # Provider sections added below dynamically based on provider enum order
+        self.register_section("agent", "Agent", "Agent behavior settings", order=10) # Increase order to ensure they come after providers
+        self.register_section("resources", "Resources", "Resource monitoring", order=11)
 
-
-        # General Settings
+        # --- General Settings ---
         self.register_setting(Setting(
             key="general.log_level", name="Log Level", type=SettingType.SELECT,
             description="Application logging detail level", default_value="INFO", section="general", order=0,
             options=[{"label": lvl, "value": lvl} for lvl in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]]
         ))
 
-        # UI Settings
+        # --- UI Settings ---
         self.register_setting(Setting(
             key="ui.host", name="Listen Host", type=SettingType.STRING,
             description="Network address for the UI server (use 0.0.0.0 for external access)", default_value="localhost", section="ui", order=0
@@ -324,7 +319,7 @@ class SettingsPanel:
             description="Limit lines shown in output areas", default_value=1000, section="ui", order=6, min_value=50
         ))
 
-        # Chat Settings
+        # --- Chat Settings ---
         self.register_setting(Setting(
             key="chat.max_history_for_llm", name="Context History Length", type=SettingType.NUMBER,
             description="Max number of past messages sent to LLM", default_value=20, section="chat", order=0, min_value=0, max_value=100
@@ -334,7 +329,7 @@ class SettingsPanel:
             description="Automatically save chat sessions", default_value=True, section="chat", order=1
         ))
 
-        # API Settings (General)
+        # --- API Settings (General) ---
         self.register_setting(Setting(
             key="api.default_provider", name="Default Provider", type=SettingType.SELECT,
             description="Primary LLM provider to use if preferred fails", default_value="openrouter", section="api", order=0,
@@ -354,39 +349,45 @@ class SettingsPanel:
         ))
 
         # --- Provider Specific Sections & Settings ---
-        provider_configs = self.config_manager.get_config("api.providers", {}) # Get defaults
-        provider_index = 0
-        for provider in APIProvider:
-             if provider == APIProvider.CUSTOM: continue
-             provider_name = provider.name.lower()
-             if provider_name not in provider_configs: continue # Skip if no default config exists
+        provider_configs = self.config_manager.get_config("api.providers", {}) # Get defaults from CM
+        provider_index = 0 # Start provider sections after the main API section
+        for provider_enum in APIProvider:
+             if provider_enum == APIProvider.CUSTOM: continue
+             provider_name = provider_enum.name.lower()
+             config_defaults = provider_configs.get(provider_name, {}) # Get defaults for this specific provider
 
-             config_defaults = provider_configs[provider_name]
              section_id = f"api_{provider_name}"
-             self.register_section(section_id, provider.name.capitalize(), f"Settings for {provider.name.capitalize()}", order=provider_index)
+             self.register_section(section_id, provider_enum.name.capitalize(), f"Settings for {provider_enum.name.capitalize()}", order=provider_index + 4) # Start after main API section
              provider_index += 1
 
-             # Common provider settings
-             self.register_setting(Setting(f"api.{provider_name}.enabled", "Enable Provider", SettingType.BOOLEAN, f"Use {provider.name.capitalize()} for API calls", default_value=config_defaults.get("enabled", True), section=section_id, order=0))
-             self.register_setting(Setting(f"api.{provider_name}.api_key", "API Key", SettingType.PASSWORD, f"{provider.name.capitalize()} API Key (Stored Securely)", default_value="", section=section_id, order=1)) # API Key default is always empty string
+             # Always register these core fields for each provider
+             self.register_setting(Setting(f"api.{provider_name}.enabled", "Enable Provider", SettingType.BOOLEAN, f"Use {provider_enum.name.capitalize()} for API calls", default_value=config_defaults.get("enabled", True), section=section_id, order=0))
+             self.register_setting(Setting(f"api.{provider_name}.api_key", "API Key", SettingType.PASSWORD, f"{provider_enum.name.capitalize()} API Key (Stored Securely)", default_value="", section=section_id, order=1))
              if "default_model" in config_defaults:
-                 self.register_setting(Setting(f"api.{provider_name}.default_model", "Default Model", SettingType.STRING, f"Default {provider.name.capitalize()} model ID", default_value=config_defaults.get("default_model"), section=section_id, order=2))
+                 self.register_setting(Setting(f"api.{provider_name}.default_model", "Default Model", SettingType.STRING, f"Default {provider_enum.name.capitalize()} model ID", default_value=config_defaults.get("default_model"), section=section_id, order=2))
              if "base_url" in config_defaults:
-                  self.register_setting(Setting(f"api.{provider_name}.base_url", "Base URL", SettingType.STRING, f"{provider.name.capitalize()} API endpoint URL", default_value=config_defaults.get("base_url"), section=section_id, order=10))
+                  self.register_setting(Setting(f"api.{provider_name}.base_url", "Base URL", SettingType.STRING, f"{provider_enum.name.capitalize()} API endpoint URL", default_value=config_defaults.get("base_url"), section=section_id, order=10))
              if "timeout" in config_defaults:
                   self.register_setting(Setting(f"api.{provider_name}.timeout", "Timeout (s)", SettingType.NUMBER, "Request timeout", default_value=config_defaults.get("timeout"), section=section_id, order=11, min_value=1))
 
-             # Specific settings
-             if provider == APIProvider.OPENROUTER:
-                  self.register_setting(Setting(f"api.{provider_name}.referer", "HTTP Referer", SettingType.STRING, "Referer header (often required)", default_value=config_defaults.get("referer", "https://minimanus.app"), section=section_id, order=12))
-                  self.register_setting(Setting(f"api.{provider_name}.x_title", "X-Title", SettingType.STRING, "X-Title header (optional)", default_value=config_defaults.get("x_title", "miniManus"), section=section_id, order=13))
-             elif provider == APIProvider.DEEPSEEK:
-                  self.register_setting(Setting(f"api.{provider_name}.embedding_model", "Embedding Model", SettingType.STRING, "Default embedding model ID", default_value=config_defaults.get("embedding_model"), section=section_id, order=3))
-             elif provider == APIProvider.OLLAMA or provider == APIProvider.LITELLM:
-                  self.register_setting(Setting(f"api.{provider_name}.discovery_enabled", "Enable Discovery", SettingType.BOOLEAN, "Scan network for service", default_value=config_defaults.get("discovery_enabled", True), section=section_id, order=12))
-                  # Add other discovery settings if needed (ports, timeout, max_hosts) by reading from config_defaults
+             # Provider-Specific Optional Settings
+             if "referer" in config_defaults:
+                  self.register_setting(Setting(f"api.{provider_name}.referer", "HTTP Referer", SettingType.STRING, "Referer header", default_value=config_defaults.get("referer"), section=section_id, order=12))
+             if "x_title" in config_defaults:
+                 self.register_setting(Setting(f"api.{provider_name}.x_title", "X-Title", SettingType.STRING, "X-Title header", default_value=config_defaults.get("x_title"), section=section_id, order=13))
+             if "embedding_model" in config_defaults:
+                 self.register_setting(Setting(f"api.{provider_name}.embedding_model", "Embedding Model", SettingType.STRING, "Default embedding model ID", default_value=config_defaults.get("embedding_model"), section=section_id, order=3))
+             if "discovery_enabled" in config_defaults:
+                 self.register_setting(Setting(f"api.{provider_name}.discovery_enabled", "Enable Discovery", SettingType.BOOLEAN, "Scan network for service", default_value=config_defaults.get("discovery_enabled", False), section=section_id, order=14)) # Default false unless specified
+             if "discovery_ports" in config_defaults:
+                  # Representing list as string for basic input, UI might need custom widget
+                  self.register_setting(Setting(f"api.{provider_name}.discovery_ports", "Discovery Ports", SettingType.STRING, "Ports to scan (comma-separated)", default_value=",".join(map(str, config_defaults.get("discovery_ports", []))), section=section_id, order=15))
+             if "discovery_max_hosts" in config_defaults:
+                  self.register_setting(Setting(f"api.{provider_name}.discovery_max_hosts", "Discovery Max Hosts", SettingType.NUMBER, "Max hosts to scan", default_value=config_defaults.get("discovery_max_hosts", 20), section=section_id, order=16, min_value=1))
+             if "discovery_timeout" in config_defaults:
+                  self.register_setting(Setting(f"api.{provider_name}.discovery_timeout", "Discovery Timeout (s)", SettingType.NUMBER, "Timeout per host scan", default_value=config_defaults.get("discovery_timeout", 1.0), section=section_id, order=17, min_value=0.1))
 
-        # Agent Settings
+        # --- Agent Settings ---
         agent_defaults = self.config_manager.get_config("agent", {})
         self.register_setting(Setting(
              key="agent.max_iterations", name="Max Agent Iterations", type=SettingType.NUMBER,
@@ -397,7 +398,6 @@ class SettingsPanel:
              description="LLM provider the agent uses for reasoning/planning", default_value=agent_defaults.get("default_provider", "openrouter"), section="agent", order=1,
              options=[{"label": p.name.capitalize(), "value": p.name.lower()} for p in APIProvider if p != APIProvider.CUSTOM]
         ))
-        # File paths might need careful handling/validation in UI
         files_defaults = agent_defaults.get("files", {})
         self.register_setting(Setting(
              key="agent.files.allowed_read_dir", name="Allowed Read Directory", type=SettingType.STRING,
@@ -408,15 +408,30 @@ class SettingsPanel:
              description="Base directory agent can write files to (Use with extreme caution!)", default_value=files_defaults.get("allowed_write_dir", str(Path.home() / "minimanus_files" / "agent_writes")), section="agent", order=3
         ))
 
-        # Resource Settings
+        # --- Resource Settings ---
         resource_defaults = self.config_manager.get_config("resources", {})
         self.register_setting(Setting("resources.monitoring_interval", "Monitor Interval (s)", SettingType.NUMBER, "How often to check resources", resource_defaults.get("monitoring_interval", 30), section="resources", order=0, min_value=5))
         self.register_setting(Setting("resources.memory_warning_threshold", "Memory Warning (%)", SettingType.NUMBER, "Memory usage warning level", resource_defaults.get("memory_warning_threshold", 75), section="resources", order=1, min_value=0, max_value=100))
         self.register_setting(Setting("resources.memory_critical_threshold", "Memory Critical (%)", SettingType.NUMBER, "Memory usage critical level", resource_defaults.get("memory_critical_threshold", 85), section="resources", order=2, min_value=0, max_value=100))
-        # Add other resource thresholds... CPU, Storage, Battery...
+        self.register_setting(Setting("resources.memory_emergency_threshold", "Memory Emergency (%)", SettingType.NUMBER, "Memory usage emergency level", resource_defaults.get("memory_emergency_threshold", 90), section="resources", order=3, min_value=0, max_value=100))
+        self.register_setting(Setting("resources.cpu_warning_threshold", "CPU Warning (%)", SettingType.NUMBER, "CPU usage warning level", resource_defaults.get("cpu_warning_threshold", 80), section="resources", order=4, min_value=0, max_value=100))
+        self.register_setting(Setting("resources.cpu_critical_threshold", "CPU Critical (%)", SettingType.NUMBER, "CPU usage critical level", resource_defaults.get("cpu_critical_threshold", 90), section="resources", order=5, min_value=0, max_value=100))
+        self.register_setting(Setting("resources.cpu_emergency_threshold", "CPU Emergency (%)", SettingType.NUMBER, "CPU usage emergency level", resource_defaults.get("cpu_emergency_threshold", 95), section="resources", order=6, min_value=0, max_value=100))
+        self.register_setting(Setting("resources.storage_warning_threshold", "Storage Warning (%)", SettingType.NUMBER, "Storage usage warning level", resource_defaults.get("storage_warning_threshold", 85), section="resources", order=7, min_value=0, max_value=100))
+        self.register_setting(Setting("resources.storage_critical_threshold", "Storage Critical (%)", SettingType.NUMBER, "Storage usage critical level", resource_defaults.get("storage_critical_threshold", 95), section="resources", order=8, min_value=0, max_value=100))
+        self.register_setting(Setting("resources.storage_emergency_threshold", "Storage Emergency (%)", SettingType.NUMBER, "Storage usage emergency level", resource_defaults.get("storage_emergency_threshold", 98), section="resources", order=9, min_value=0, max_value=100))
+        self.register_setting(Setting("resources.battery_warning_threshold", "Battery Warning (%)", SettingType.NUMBER, "Battery level warning", resource_defaults.get("battery_warning_threshold", 20), section="resources", order=10, min_value=0, max_value=100))
+        self.register_setting(Setting("resources.battery_critical_threshold", "Battery Critical (%)", SettingType.NUMBER, "Battery level critical", resource_defaults.get("battery_critical_threshold", 10), section="resources", order=11, min_value=0, max_value=100))
+        self.register_setting(Setting("resources.battery_emergency_threshold", "Battery Emergency (%)", SettingType.NUMBER, "Battery level emergency", resource_defaults.get("battery_emergency_threshold", 5), section="resources", order=12, min_value=0, max_value=100))
+
+        # --- Model Preferences (Register the keys, values are managed by ModelSelectionInterface) ---
+        self.register_setting(Setting("models.favorites", "Favorite Models", SettingType.STRING, "List of favorite model IDs (internal use)", default_value=[], section="advanced", order=0)) # Type might be complex, treat as string for basic setting view
+        self.register_setting(Setting("models.recents", "Recent Models", SettingType.STRING, "List of recently used model IDs (internal use)", default_value=[], section="advanced", order=1))
+        self.register_setting(Setting("models.max_recents", "Max Recent Models", SettingType.NUMBER, "How many recent models to remember", default_value=10, section="advanced", order=2, min_value=1))
 
 
         self.logger.info(f"Registered {len(self.settings)} default settings explicitly.")
+        # --- End of Restored Settings Registration ---
 
     def startup(self) -> None:
         """Start the settings panel."""
@@ -428,33 +443,37 @@ class SettingsPanel:
         """Stop the settings panel."""
         self.logger.info("SettingsPanel stopped")
 
-
     # --- Mock default config for standalone testing ---
     @staticmethod
     def _get_mock_default_config():
-         # Provide a minimal structure similar to ConfigManager's defaults
-         # This is only used if run directly (`if __name__ == "__main__"`) and imports fail
-         # Should align with the structure used in _register_default_settings
+         # This needs to reflect the structure used in _register_default_settings
          return {
-             "general": {"log_level": "INFO"},
-             "ui": {"host": "localhost", "port": 8080, "theme": "dark", "font_size": 14, "animations_enabled": True, "compact_mode": False, "max_output_lines": 1000},
-             "chat": {"max_history_for_llm": 20, "auto_save": True},
-             "api": {
-                 "default_provider": "openrouter",
-                 "cache": {"enabled": True, "ttl_seconds": 3600, "max_items": 500},
-                 "providers": {
-                     "openrouter": {"enabled": True, "base_url": "https://openrouter.ai/api/v1", "default_model": "openai/gpt-3.5-turbo", "timeout": 60, "referer": "https://minimanus.app", "x_title": "miniManus"},
-                     "anthropic": {"enabled": True, "base_url": "https://api.anthropic.com/v1", "default_model": "claude-3-5-sonnet-20240620", "timeout": 60},
-                     "deepseek": {"enabled": True, "base_url": "https://api.deepseek.com/v1", "default_model": "deepseek-chat", "embedding_model": "deepseek-embedding", "timeout": 30},
-                     "ollama": {"enabled": True, "base_url": "http://localhost:11434", "default_model": "llama3", "timeout": 120, "discovery_enabled": True},
-                     "litellm": {"enabled": True, "base_url": "http://localhost:8000", "default_model": "gpt-3.5-turbo", "embedding_model": "text-embedding-ada-002", "timeout": 60, "discovery_enabled": True}
-                 }
+            "general": {"log_level": "INFO"},
+            "ui": {"host": "localhost", "port": 8080, "theme": "dark", "font_size": 14, "animations_enabled": True, "compact_mode": False, "max_output_lines": 1000},
+            "chat": {"max_history_for_llm": 20, "auto_save": True},
+            "api": {
+                "default_provider": "openrouter",
+                "cache": {"enabled": True, "ttl_seconds": 3600, "max_items": 500},
+                "providers": {
+                    "openrouter": {"enabled": True, "base_url": "https://openrouter.ai/api/v1", "default_model": "openai/gpt-3.5-turbo", "timeout": 60, "referer": "https://minimanus.app", "x_title": "miniManus"},
+                    "anthropic": {"enabled": True, "base_url": "https://api.anthropic.com/v1", "default_model": "claude-3-5-sonnet-20240620", "timeout": 60},
+                    "deepseek": {"enabled": True, "base_url": "https://api.deepseek.com/v1", "default_model": "deepseek-chat", "embedding_model": "deepseek-embedding", "timeout": 30},
+                    "ollama": {"enabled": True, "base_url": "http://localhost:11434", "default_model": "llama3", "timeout": 120, "discovery_enabled": True, "discovery_ports": [11434], "discovery_max_hosts": 20, "discovery_timeout": 1.0},
+                    "litellm": {"enabled": True, "base_url": "http://localhost:8000", "default_model": "gpt-3.5-turbo", "embedding_model": "text-embedding-ada-002", "timeout": 60, "discovery_enabled": True, "discovery_ports": [8000, 4000], "discovery_max_hosts": 20, "discovery_timeout": 1.0}
+                }
              },
              "agent": {
                   "max_iterations": 5, "default_provider": "openrouter",
                   "files": {"allowed_read_dir": str(Path.home() / "minimanus_files"), "allowed_write_dir": str(Path.home() / "minimanus_files" / "agent_writes")}
               },
-             "resources": {"monitoring_interval": 30, "memory_warning_threshold": 75, "memory_critical_threshold": 85}
+             "resources": {
+                  "monitoring_interval": 30,
+                  "memory_warning_threshold": 75, "memory_critical_threshold": 85, "memory_emergency_threshold": 90,
+                  "cpu_warning_threshold": 80, "cpu_critical_threshold": 90, "cpu_emergency_threshold": 95,
+                  "storage_warning_threshold": 85, "storage_critical_threshold": 95, "storage_emergency_threshold": 98,
+                  "battery_warning_threshold": 20, "battery_critical_threshold": 10, "battery_emergency_threshold": 5
+              },
+             "models": {"favorites": [], "recents": [], "max_recents": 10}
          }
 
 
@@ -463,9 +482,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     print("--- Running SettingsPanel Standalone Test ---")
     # Use dummy instances defined in the ImportError block
-    # Ensure ConfigManager dummy uses the mock defaults
-    ConfigurationManager._instance = ConfigurationManager() # Create dummy CM instance
-
     settings_panel = SettingsPanel.get_instance()
     settings_panel.startup()
 
@@ -480,18 +496,13 @@ if __name__ == "__main__":
          print(f"  Default Value: {theme_setting.default_value}")
          print(f"  Current Value: {settings_panel.get_setting_value('ui.theme')}")
          settings_panel.set_setting_value('ui.theme', 'light')
-         # In test mode, set_setting_value only prints, doesn't change underlying mock config
-         # print(f"  New Value (Attempted Set): {settings_panel.get_setting_value('ui.theme')}")
          settings_panel.reset_setting('ui.theme')
-         # print(f"  Value after reset (Attempted): {settings_panel.get_setting_value('ui.theme')}")
     else:
         print("ui.theme setting not found.")
 
     print("\n--- All Settings ---")
     all_settings_list = settings_panel.get_all_settings()
     print(f"Total settings registered: {len(all_settings_list)}")
-    # for setting in all_settings_list:
-    #      print(f"  - {setting.key} (Section: {setting.section}, Order: {setting.order}) = {settings_panel.get_setting_value(setting.key)}")
 
 
     settings_panel.shutdown()
