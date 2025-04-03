@@ -21,6 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Global State (Simple) ---
     let currentSettings = {}; // Store loaded settings
     let availableModels = {}; // Store models fetched per provider: { providerName: [modelData] }
+    let isFetchingModels = {}; // Track fetching state per provider
 
     // --- Theme Handling ---
     const applyTheme = (theme) => {
@@ -73,23 +74,34 @@ document.addEventListener('DOMContentLoaded', () => {
                 try {
                     errorData = await response.json();
                 } catch (e) {
-                    errorData = { message: `HTTP error ${response.status}` };
+                    // If response is not JSON, use status text or default message
+                    errorData = { message: response.statusText || `HTTP error ${response.status}` };
                 }
                 console.error(`API Error (${response.status}):`, errorData);
                 throw new Error(errorData.message || `HTTP error ${response.status}`);
             }
-            // Handle empty response for methods like POST that might return 200 OK with no body
             if (response.status === 204 || response.headers.get('Content-Length') === '0') {
-                return null; // Or return an empty object/success indicator as needed
+                return null;
             }
-            const data = await response.json();
-            console.debug(`API Response: ${method} ${endpoint}`, data);
-            return data;
+            // Check content type before parsing JSON
+            const contentType = response.headers.get("content-type");
+            if (contentType && contentType.includes("application/json")) {
+                 const data = await response.json();
+                 console.debug(`API Response: ${method} ${endpoint}`, data);
+                 return data;
+            } else {
+                 // Handle non-JSON success responses if necessary, or consider it an error
+                 const textData = await response.text();
+                 console.warn(`API Warning: Received non-JSON response for ${method} ${endpoint}`, textData);
+                 // Decide how to handle: return text, null, or throw error?
+                 // For settings save, a 200 OK might be enough, even if body is missing/not json
+                 if (method === 'POST' && endpoint === '/api/settings') return { status: 'success', message: 'Settings updated (non-JSON response)' };
+                 // Otherwise, treat as unexpected
+                 throw new Error("Received unexpected non-JSON response from server.");
+            }
         } catch (error) {
             console.error(`API Request Failed: ${method} ${endpoint}`, error);
-            // Optionally display error to user
-            // addMessage('assistant', `Error communicating with backend: ${error.message}`);
-            throw error; // Re-throw for caller handling if necessary
+            throw error;
         }
     };
 
@@ -101,55 +113,74 @@ document.addEventListener('DOMContentLoaded', () => {
             div.style.display = div.id === `${selectedProvider}-settings` ? 'block' : 'none';
         });
         // Fetch models for the newly selected provider if not already fetched
-        if (selectedProvider && !availableModels[selectedProvider]) {
-            fetchAndPopulateModels(selectedProvider);
+        if (selectedProvider && !isFetchingModels[selectedProvider]) {
+             // Fetch ONLY if not already fetched OR if the cache is considered stale (e.g., after save)
+             // For simplicity now, only fetch if never fetched or if explicitly refreshed
+            if (!availableModels[selectedProvider]) {
+                fetchAndPopulateModels(selectedProvider);
+            } else {
+                // Models already fetched, ensure dropdown is populated correctly
+                populateModelDropdown(selectedProvider, availableModels[selectedProvider]);
+                 // Restore selected value after populating (important if switching back)
+                restoreSelectedModel(selectedProvider);
+            }
         } else if (selectedProvider && availableModels[selectedProvider]) {
-            // Models already fetched, just populate dropdown
+             // If currently fetching, do nothing, let the fetch complete
+             // If already fetched, ensure dropdown is correct
              populateModelDropdown(selectedProvider, availableModels[selectedProvider]);
+             restoreSelectedModel(selectedProvider);
         }
     };
 
     // Function to fetch models for a specific provider
-    const fetchAndPopulateModels = async (providerName) => {
+    const fetchAndPopulateModels = async (providerName, forceRefresh = false) => {
         const modelSelect = document.getElementById(`${providerName}-model`);
-        if (!modelSelect) return; // Element doesn't exist
+        const refreshButton = document.getElementById(`${providerName}-refresh-models`);
+        if (!modelSelect) return;
 
+        // Prevent multiple simultaneous fetches
+        if (isFetchingModels[providerName] && !forceRefresh) {
+             console.log(`Already fetching models for ${providerName}.`);
+             return;
+        }
+
+        // Skip fetch if data exists and not forcing refresh
+        if (availableModels[providerName] && !forceRefresh) {
+            console.log(`Using cached models for ${providerName}.`);
+            populateModelDropdown(providerName, availableModels[providerName]);
+            restoreSelectedModel(providerName);
+            return;
+        }
+
+
+        isFetchingModels[providerName] = true;
         // Show loading state
         modelSelect.innerHTML = '<option value="" disabled selected>Loading models...</option>';
         modelSelect.disabled = true;
+        if (refreshButton) refreshButton.disabled = true;
+
 
         try {
             console.log(`Fetching models for provider: ${providerName}...`);
+            // Clear previous cache if forcing refresh
+            if (forceRefresh) {
+                 delete availableModels[providerName];
+            }
             const data = await apiRequest(`/api/models?provider=${providerName}`);
             availableModels[providerName] = data.models || []; // Store fetched models
             populateModelDropdown(providerName, availableModels[providerName]);
             console.log(`Successfully fetched ${availableModels[providerName].length} models for ${providerName}.`);
 
              // Restore selected value after populating
-            const savedModel = currentSettings?.api?.providers?.[providerName]?.default_model;
-            if (savedModel) {
-                modelSelect.value = savedModel;
-                 // Fallback if saved value isn't in the list
-                if (modelSelect.value !== savedModel && modelSelect.options.length > 1) {
-                     modelSelect.selectedIndex = 1; // Select the first actual model
-                     console.warn(`Saved default model '${savedModel}' not found for ${providerName}. Selecting first available.`);
-                } else if (modelSelect.value !== savedModel) {
-                     // No models available other than "loading..."
-                     modelSelect.innerHTML = '<option value="" disabled selected>No models found</option>';
-                }
-            } else if(modelSelect.options.length > 1) {
-                // If no saved model, select the first actual model in the list
-                 modelSelect.selectedIndex = 1;
-            } else if (modelSelect.options.length <= 1){
-                 modelSelect.innerHTML = '<option value="" disabled selected>No models found</option>';
-            }
+             restoreSelectedModel(providerName);
 
         } catch (error) {
             console.error(`Failed to fetch models for ${providerName}:`, error);
-            modelSelect.innerHTML = '<option value="" disabled selected>Error loading models</option>';
-            // Optionally add a retry button or mechanism
+            modelSelect.innerHTML = `<option value="" disabled selected>Error: ${error.message}</option>`;
         } finally {
             modelSelect.disabled = false; // Re-enable select even on error
+            if (refreshButton) refreshButton.disabled = false;
+            isFetchingModels[providerName] = false;
         }
     };
 
@@ -158,20 +189,61 @@ document.addEventListener('DOMContentLoaded', () => {
         const modelSelect = document.getElementById(`${providerName}-model`);
         if (!modelSelect) return;
 
-        // Clear existing options except the placeholder
-        modelSelect.innerHTML = '<option value="" disabled selected>Select a model...</option>';
+        const currentVal = modelSelect.value; // Remember current selection if any
+        modelSelect.innerHTML = '<option value="" disabled>Select a model...</option>'; // Placeholder
 
         if (models && models.length > 0) {
+            models.sort((a, b) => a.id.localeCompare(b.id)); // Sort models alphabetically by ID
             models.forEach(model => {
                 const option = document.createElement('option');
                 option.value = model.id;
-                // Use name for display, fallback to id
                 option.textContent = model.name ? `${model.name} (${model.id})` : model.id;
+                // Add description as title for hover effect
+                if (model.description) {
+                     option.title = model.description;
+                }
                 modelSelect.appendChild(option);
             });
+            // Try to restore previous selection
+            if (currentVal && modelSelect.querySelector(`option[value="${CSS.escape(currentVal)}"]`)) {
+                 modelSelect.value = currentVal;
+            } else if (modelSelect.options.length > 1) {
+                 // If previous selection invalid or none, select the first actual model
+                 // modelSelect.selectedIndex = 1; // Select first actual model
+                 modelSelect.value = ""; // Keep placeholder selected initially
+            } else {
+                 // No models other than placeholder
+                 modelSelect.innerHTML = '<option value="" disabled selected>No models available</option>';
+            }
+
         } else {
             modelSelect.innerHTML = '<option value="" disabled selected>No models found</option>';
         }
+    };
+
+    // Function to restore the selected model based on currentSettings
+    const restoreSelectedModel = (providerName) => {
+         const modelSelect = document.getElementById(`${providerName}-model`);
+         if (!modelSelect) return;
+
+         const savedModel = currentSettings?.api?.providers?.[providerName]?.default_model;
+
+         if (savedModel && modelSelect.querySelector(`option[value="${CSS.escape(savedModel)}"]`)) {
+             modelSelect.value = savedModel;
+             console.debug(`Restored selection for ${providerName} to ${savedModel}`);
+         } else if (savedModel) {
+              console.warn(`Saved default model '${savedModel}' not found in dropdown for ${providerName}.`);
+              // Keep placeholder selected
+              modelSelect.value = "";
+         } else {
+              // No saved model, keep placeholder selected
+              modelSelect.value = "";
+         }
+
+         // Ensure placeholder is selected if value is empty and placeholder exists
+         if (!modelSelect.value && modelSelect.options[0] && modelSelect.options[0].disabled) {
+             modelSelect.selectedIndex = 0;
+         }
     };
 
 
@@ -190,11 +262,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 applyFontSize(fontSizeSlider.value); // Apply loaded font size
                 setInitialTheme(themeSelect.value); // Apply loaded theme
             } else {
-                 // Apply defaults if ui section missing
                  applyFontSize(14);
                  setInitialTheme('dark');
             }
-
 
             if (currentSettings.api && currentSettings.api.default_provider) {
                 defaultProviderSelect.value = currentSettings.api.default_provider;
@@ -208,29 +278,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 const modelSelect = document.getElementById(`${providerName}-model`);
                 const baseUrlInput = document.getElementById(`${providerName}-base_url`);
                 const discoveryCheckbox = document.getElementById(`${providerName}-discovery_enabled`);
-                 const embeddingModelInput = document.getElementById(`${providerName}-embedding-model`); // Generic embedding model field name
-                 const refererInput = document.getElementById(`${providerName}-referer`);
-                 const xTitleInput = document.getElementById(`${providerName}-x_title`);
+                const embeddingModelInput = document.getElementById(`${providerName}-embedding-model`);
+                const refererInput = document.getElementById(`${providerName}-referer`);
+                const xTitleInput = document.getElementById(`${providerName}-x_title`);
 
-
-                // API Key (Secrets are not sent, so this field will be blank)
                 if (apiKeyInput) {
-                    apiKeyInput.value = ''; // Clear on load, user needs to re-enter if changed
-                    apiKeyInput.placeholder = 'Enter API Key (if needed)';
+                    apiKeyInput.value = '';
+                    apiKeyInput.placeholder = 'Enter API Key (if needed/changed)';
                 }
-                // Base URL
                 if (baseUrlInput && providerConfig.base_url) {
                     baseUrlInput.value = providerConfig.base_url;
                 }
-                 // Embedding Model
-                 if (embeddingModelInput && providerConfig.embedding_model) {
+                if (embeddingModelInput && providerConfig.embedding_model) {
                      embeddingModelInput.value = providerConfig.embedding_model;
-                 }
-                 // Discovery Enabled
-                 if (discoveryCheckbox) {
-                     discoveryCheckbox.checked = providerConfig.discovery_enabled !== false; // Default true if not present
-                 }
-                 // OpenRouter Specific Headers
+                }
+                if (discoveryCheckbox) {
+                     discoveryCheckbox.checked = providerConfig.discovery_enabled !== false;
+                }
                  if (refererInput && providerConfig.referer) {
                      refererInput.value = providerConfig.referer;
                  }
@@ -238,36 +302,19 @@ document.addEventListener('DOMContentLoaded', () => {
                      xTitleInput.value = providerConfig.x_title;
                  }
 
-
-                // Default Model (set value, but don't populate options yet)
+                // Set the saved default model value (options populated later)
                 if (modelSelect && providerConfig.default_model) {
-                    // We just set the value for now. fetchAndPopulateModels will handle options.
-                     // Ensure the select has at least the saved option temporarily
-                     let found = false;
-                     for (let i = 0; i < modelSelect.options.length; i++) {
-                         if (modelSelect.options[i].value === providerConfig.default_model) {
-                             found = true;
-                             break;
-                         }
-                     }
-                     if (!found) {
-                          const tempOption = document.createElement('option');
-                          tempOption.value = providerConfig.default_model;
-                          tempOption.textContent = `${providerConfig.default_model} (saved)`;
-                          tempOption.selected = true;
-                          modelSelect.appendChild(tempOption);
-                     }
-                     modelSelect.value = providerConfig.default_model;
+                    // Set the value directly, restoreSelectedModel will handle selection later
+                    modelSelect.value = providerConfig.default_model;
                 }
             }
 
-            updateProviderSettingsVisibility(); // Show correct provider section initially
+            updateProviderSettingsVisibility(); // Show correct section and trigger initial model fetch
             console.log("Settings applied to UI.");
-
 
         } catch (error) {
             console.error("Failed to load settings:", error);
-            // Handle error (e.g., show message to user)
+            alert(`Error loading settings: ${error.message}`);
         }
     };
 
@@ -291,55 +338,57 @@ document.addEventListener('DOMContentLoaded', () => {
             const refererInput = document.getElementById(`${providerName}-referer`);
             const xTitleInput = document.getElementById(`${providerName}-x_title`);
 
-
             // Save API key ONLY if user entered something (it's not loaded from backend)
-            if (apiKeyInput && apiKeyInput.value) {
-                settingsToSave[`api.${providerName}.api_key`] = apiKeyInput.value;
+            if (apiKeyInput && apiKeyInput.value.trim()) { // Use trim()
+                settingsToSave[`api.${providerName}.api_key`] = apiKeyInput.value.trim();
             }
             if (modelSelect) {
-                 // Ensure a value is selected before saving, don't save the placeholder ""
                  if(modelSelect.value) {
                     settingsToSave[`api.${providerName}.default_model`] = modelSelect.value;
-                 } else {
-                     // Optionally save null or remove the key if nothing is selected
-                     console.warn(`No model selected for ${providerName}, not saving default_model.`);
                  }
             }
             if (baseUrlInput) {
-                settingsToSave[`api.${providerName}.base_url`] = baseUrlInput.value;
+                settingsToSave[`api.${providerName}.base_url`] = baseUrlInput.value.trim(); // Use trim()
             }
             if (discoveryCheckbox) {
                  settingsToSave[`api.${providerName}.discovery_enabled`] = discoveryCheckbox.checked;
             }
             if (embeddingModelInput) {
-                 settingsToSave[`api.${providerName}.embedding_model`] = embeddingModelInput.value;
+                 settingsToSave[`api.${providerName}.embedding_model`] = embeddingModelInput.value.trim(); // Use trim()
             }
-            // OpenRouter Specific Headers
             if (refererInput) {
-                settingsToSave[`api.${providerName}.referer`] = refererInput.value;
+                settingsToSave[`api.${providerName}.referer`] = refererInput.value.trim(); // Use trim()
             }
             if (xTitleInput) {
-                settingsToSave[`api.${providerName}.x_title`] = xTitleInput.value;
+                settingsToSave[`api.${providerName}.x_title`] = xTitleInput.value.trim(); // Use trim()
             }
         });
 
-        console.log("Saving settings:", settingsToSave);
+        console.log("Saving settings:", settingsToSave); // Avoid logging full object if keys are present
 
         try {
             await apiRequest('/api/settings', 'POST', settingsToSave);
             console.log("Settings saved successfully.");
-            // Optionally show success message
             alert("Settings saved!");
              // Clear password fields after successful save
              providers.forEach(providerName => {
                  const apiKeyInput = document.getElementById(`${providerName}-api-key`);
                  if (apiKeyInput) apiKeyInput.value = '';
              });
-             // Reload settings to confirm changes (optional, good practice)
-             await loadSettings();
+
+             // Refresh current provider's models after saving, as settings might affect availability
+             const currentProvider = defaultProviderSelect.value;
+             if (currentProvider) {
+                  console.log(`Refreshing models for ${currentProvider} after saving settings...`);
+                  await fetchAndPopulateModels(currentProvider, true); // Force refresh
+             } else {
+                 // Reload all settings to reflect changes accurately if no provider selected
+                 await loadSettings();
+             }
+
+
         } catch (error) {
             console.error("Failed to save settings:", error);
-            // Show error message to user
             alert(`Error saving settings: ${error.message}`);
         }
     };
@@ -371,45 +420,70 @@ document.addEventListener('DOMContentLoaded', () => {
             if (response && response.response) {
                 addMessage('assistant', response.response);
             } else {
-                addMessage('assistant', 'Received an empty or invalid response.');
+                // Handle case where response is null or response.response is missing
+                 addMessage('assistant', response?.message || 'Received an empty or invalid response from server.');
             }
         } catch (error) {
             addMessage('assistant', `Error: ${error.message}`);
         } finally {
             sendButton.disabled = false; // Re-enable button
+            messageInput.focus(); // Refocus input
         }
     };
 
     // --- UI Navigation ---
     const switchTab = (targetTab) => {
-        // Hide all sections
         document.querySelectorAll('.section').forEach(section => {
             section.classList.remove('active-section');
         });
-        // Deactivate all nav links
         document.querySelectorAll('nav a').forEach(link => {
             link.classList.remove('active');
         });
 
-        // Show target section
         const sectionToShow = document.getElementById(`${targetTab}-section`);
         if (sectionToShow) {
             sectionToShow.classList.add('active-section');
         }
-        // Activate target nav link
         const linkToActivate = document.querySelector(`nav a[data-tab="${targetTab}"]`);
         if (linkToActivate) {
             linkToActivate.classList.add('active');
         }
 
-        // Fetch models if switching to settings tab and provider models aren't loaded
+        // Fetch models if switching to settings tab and current provider models aren't loaded/cached
         if(targetTab === 'settings') {
              const selectedProvider = defaultProviderSelect.value;
-             if(selectedProvider && !availableModels[selectedProvider]) {
+             if(selectedProvider && !availableModels[selectedProvider] && !isFetchingModels[selectedProvider]) {
                  fetchAndPopulateModels(selectedProvider);
              }
         }
     };
+
+     // --- Add Refresh Buttons ---
+     const addRefreshButtons = () => {
+         const providers = currentSettings?.api?.providers ? Object.keys(currentSettings.api.providers) : ['openrouter', 'anthropic', 'deepseek', 'ollama', 'litellm'];
+         providers.forEach(providerName => {
+             const modelSettingItem = document.getElementById(`${providerName}-model`)?.closest('.setting-item');
+             if (modelSettingItem) {
+                 let refreshButton = modelSettingItem.querySelector('.refresh-models-button');
+                 if (!refreshButton) { // Only add if it doesn't exist
+                     refreshButton = document.createElement('button');
+                     refreshButton.textContent = '🔄'; // Refresh icon
+                     refreshButton.title = `Refresh ${providerName} models`;
+                     refreshButton.classList.add('refresh-models-button'); // Add class for styling
+                     refreshButton.style.marginLeft = '10px'; // Add some spacing
+                     refreshButton.id = `${providerName}-refresh-models`; // Add ID
+                     refreshButton.addEventListener('click', (e) => {
+                         e.preventDefault();
+                         console.log(`Manual refresh triggered for ${providerName}`);
+                         fetchAndPopulateModels(providerName, true); // Pass true to force refresh
+                     });
+                     // Insert after the select element
+                     modelSettingItem.appendChild(refreshButton);
+                 }
+             }
+         });
+     };
+
 
     // --- Event Listeners ---
     sendButton.addEventListener('click', sendMessage);
@@ -421,13 +495,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Auto-resize textarea
     messageInput.addEventListener('input', () => {
-        messageInput.style.height = 'auto'; // Temporarily shrink
-        messageInput.style.height = (messageInput.scrollHeight) + 'px'; // Set to scroll height
+        messageInput.style.height = 'auto';
+        messageInput.style.height = (messageInput.scrollHeight) + 'px';
     });
 
-    // Tab switching
     document.querySelectorAll('nav a').forEach(link => {
         link.addEventListener('click', (e) => {
             e.preventDefault();
@@ -436,14 +508,16 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // Settings listeners
     saveSettingsButton.addEventListener('click', saveSettings);
     defaultProviderSelect.addEventListener('change', updateProviderSettingsVisibility);
     themeSelect.addEventListener('change', () => applyTheme(themeSelect.value));
     fontSizeSlider.addEventListener('input', () => applyFontSize(fontSizeSlider.value));
 
     // --- Initialization ---
-    loadSettings(); // Load settings when the page loads
+    loadSettings().then(() => {
+         // Add refresh buttons after settings are loaded and UI elements exist
+         addRefreshButtons();
+    });
     switchTab('chat'); // Start on chat tab
 
 });
