@@ -77,7 +77,7 @@ main_loop_task: Optional[asyncio.Task] = None
 
 async def main_async():
     """Main asynchronous function to initialize and start components."""
-    global system_manager, shutdown_requested
+    global system_manager, shutdown_requested # Declare intent to modify globals here
 
     logger.info(f"Starting miniManus...")
     logger.info(f"Using base directory: {BASE_DIR}")
@@ -86,23 +86,19 @@ async def main_async():
     try:
         # Core services first
         event_bus = EventBus.get_instance()
-        # EventBus startup doesn't need await if it just starts a thread
         event_bus.startup()
 
-        error_handler = ErrorHandler.get_instance() # ErrorHandler often needs EventBus
+        error_handler = ErrorHandler.get_instance()
 
-        config_manager = ConfigurationManager.get_instance() # ConfigManager might use ErrorHandler
-        config_manager.config_dir = CONFIG_DIR # Ensure correct path is used
+        config_manager = ConfigurationManager.get_instance()
+        config_manager.config_dir = CONFIG_DIR
         config_manager.secrets_file = CONFIG_DIR / 'secrets.json'
-        # Loading happens in ConfigManager's __init__
-        # config_manager._load_config() # No need to call explicitly if done in init
-        # config_manager._load_secrets()
 
         # Adjust log level based on loaded config
         log_level_str = config_manager.get_config("general.log_level", "INFO").upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
-        logging.getLogger("miniManus").setLevel(log_level) # Set level for root logger
-        for handler in logging.getLogger("miniManus").handlers: # Set for handlers too
+        logging.getLogger("miniManus").setLevel(log_level)
+        for handler in logging.getLogger("miniManus").handlers:
              handler.setLevel(log_level)
         logger.info(f"Logging level set to {log_level_str}")
 
@@ -111,62 +107,57 @@ async def main_async():
         resource_monitor.startup()
 
         plugin_manager = PluginManager.get_instance()
-        # Set plugin directories explicitly if needed beyond defaults
-        plugin_manager.plugin_dirs = [] # Clear defaults if overriding
+        plugin_manager.plugin_dirs = []
         plugin_manager.add_plugin_directory(str(PLUGINS_DIR))
-        # Add other potential plugin locations if needed
-        # plugin_manager.add_plugin_directory('/path/to/other/plugins')
-        plugin_manager.startup() # Discover plugins etc.
+        plugin_manager.startup()
 
         # API Layer
         api_manager = APIManager.get_instance()
-        api_manager.startup() # Initializes adapters
+        api_manager.startup()
 
         # Agent System
-        agent_system = AgentSystem.get_instance() # Initialize AgentSystem
+        agent_system = AgentSystem.get_instance()
 
-        # UI Layer (needs AgentSystem, ConfigManager, etc.)
-        # Needs ChatInterface, ModelSelectionInterface
+        # UI Layer
         chat_interface = ChatInterface.get_instance()
-        chat_interface.sessions_dir = DATA_DIR / 'sessions' # Ensure correct path
-        chat_interface.startup() # Loads sessions
+        chat_interface.sessions_dir = DATA_DIR / 'sessions'
+        chat_interface.startup()
 
         model_selection = ModelSelectionInterface.get_instance()
-        model_selection.startup() # Loads prefs
+        model_selection.startup()
 
         settings_panel = SettingsPanel.get_instance()
-        settings_panel.startup() # Registers settings definitions
+        settings_panel.startup()
 
         ui_manager = UIManager.get_instance()
-        # Determine static directory relative to __main__.py's location
-        # Assumes __main__.py is in minimanus/ and static/ is in minimanus/static/
         main_file_dir = Path(__file__).parent
-        # Check if static dir exists relative to main.py, otherwise use default
         potential_static_dir = main_file_dir / 'static'
         if potential_static_dir.is_dir():
              ui_manager.static_dir = str(potential_static_dir)
              logger.debug(f"Using static directory: {ui_manager.static_dir}")
         else:
-             # Fallback to default calculated in ui_manager if relative one not found
              logger.warning(f"Static directory not found at {potential_static_dir}, using default: {ui_manager.static_dir}")
-        ui_manager.startup() # Starts web server thread
+        ui_manager.startup()
 
-        # System Manager (Last, as it coordinates others)
-        system_manager = SystemManager.get_instance()
-        # Register components that might need coordination (optional, depends on SystemManager's role)
-        system_manager.register_component("event_bus", event_bus)
-        system_manager.register_component("config_manager", config_manager)
-        system_manager.register_component("resource_monitor", resource_monitor)
-        system_manager.register_component("plugin_manager", plugin_manager)
-        system_manager.register_component("api_manager", api_manager)
-        system_manager.register_component("agent_system", agent_system)
-        system_manager.register_component("chat_interface", chat_interface)
-        system_manager.register_component("model_selection", model_selection)
-        system_manager.register_component("settings_panel", settings_panel)
-        system_manager.register_component("ui_manager", ui_manager)
-        # SystemManager startup doesn't need to call component startups if they were done above
-        system_manager.startup_complete = True # Mark startup as done
-        system_manager.is_running = True
+        # System Manager (Assign global instance here)
+        # system_manager = SystemManager.get_instance() # Already instantiated in main()
+        # Just register components
+        if system_manager: # Check if it was successfully created in main()
+            system_manager.register_component("event_bus", event_bus)
+            system_manager.register_component("config_manager", config_manager)
+            system_manager.register_component("resource_monitor", resource_monitor)
+            system_manager.register_component("plugin_manager", plugin_manager)
+            system_manager.register_component("api_manager", api_manager)
+            system_manager.register_component("agent_system", agent_system)
+            system_manager.register_component("chat_interface", chat_interface)
+            system_manager.register_component("model_selection", model_selection)
+            system_manager.register_component("settings_panel", settings_panel)
+            system_manager.register_component("ui_manager", ui_manager)
+            system_manager.startup_complete = True
+            system_manager.is_running = True
+        else:
+             raise RuntimeError("SystemManager instance is unexpectedly None in main_async.")
+
 
         # Post-startup actions that require the event loop
         logger.info("Performing post-startup actions...")
@@ -184,15 +175,18 @@ async def main_async():
     except Exception as e:
         logger.critical(f"Critical error during async startup: {e}", exc_info=True)
         # Ensure shutdown is attempted even if startup fails
-        global system_manager # Ensure we can access system_manager if it was assigned
+        # NO 'global system_manager' NEEDED HERE - already global
         if system_manager and not system_manager.is_shutting_down:
+             logger.error("Attempting emergency shutdown due to startup error...")
              system_manager.shutdown(force_exit=True) # Force exit if startup failed critically
         else:
-            sys.exit(1) # Exit if system manager wasn't even initialized enough to shutdown
+            # If system_manager wasn't even assigned yet or already shutting down, just exit
+            logger.error("SystemManager not available for emergency shutdown or already shutting down.")
+            sys.exit(1)
 
 def main():
     """Main synchronous entry point."""
-    global system_manager, shutdown_requested, main_loop_task
+    global system_manager, shutdown_requested, main_loop_task # Declare globals used in this function
 
     # SystemManager now handles signal registration in its __init__
     # Ensure SystemManager is instantiated early to catch signals
