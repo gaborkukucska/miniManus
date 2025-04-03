@@ -15,7 +15,7 @@ import asyncio
 import signal
 import time
 from pathlib import Path
-from typing import Optional, Tuple # Ensure Tuple is imported if needed elsewhere, Optional is needed here
+from typing import Optional, Tuple, List # Added List for Tuple hint fix
 
 # Define the base directory for miniManus data, logs, and config
 BASE_DIR = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share')) / 'minimanus'
@@ -84,15 +84,21 @@ async def main_async():
 
     # Order of initialization matters for dependencies
     try:
-        # Core services first
+        # --- DETAILED STARTUP LOGGING ---
+        logger.debug("Initializing EventBus...")
         event_bus = EventBus.get_instance()
         event_bus.startup()
+        logger.debug("EventBus initialized and started.")
 
+        logger.debug("Initializing ErrorHandler...")
         error_handler = ErrorHandler.get_instance()
+        logger.debug("ErrorHandler initialized.")
 
+        logger.debug("Initializing ConfigManager...")
         config_manager = ConfigurationManager.get_instance()
         config_manager.config_dir = CONFIG_DIR
         config_manager.secrets_file = CONFIG_DIR / 'secrets.json'
+        logger.debug("ConfigManager initialized.")
 
         # Adjust log level based on loaded config
         log_level_str = config_manager.get_config("general.log_level", "INFO").upper()
@@ -102,33 +108,47 @@ async def main_async():
              handler.setLevel(log_level)
         logger.info(f"Logging level set to {log_level_str}")
 
-
+        logger.debug("Initializing ResourceMonitor...")
         resource_monitor = ResourceMonitor.get_instance()
         resource_monitor.startup()
+        logger.debug("ResourceMonitor initialized and started.")
 
+        logger.debug("Initializing PluginManager...")
         plugin_manager = PluginManager.get_instance()
         plugin_manager.plugin_dirs = []
         plugin_manager.add_plugin_directory(str(PLUGINS_DIR))
         plugin_manager.startup()
+        logger.debug("PluginManager initialized and started.")
 
         # API Layer
+        logger.debug("Initializing APIManager...")
         api_manager = APIManager.get_instance()
-        api_manager.startup()
+        api_manager.startup() # Initializes adapters
+        logger.debug("APIManager initialized and started.")
 
         # Agent System
-        agent_system = AgentSystem.get_instance()
+        logger.debug("Initializing AgentSystem...")
+        agent_system = AgentSystem.get_instance() # Initialize AgentSystem
+        logger.debug("AgentSystem initialized.")
 
         # UI Layer
+        logger.debug("Initializing ChatInterface...")
         chat_interface = ChatInterface.get_instance()
         chat_interface.sessions_dir = DATA_DIR / 'sessions'
-        chat_interface.startup()
+        chat_interface.startup() # Loads sessions
+        logger.debug("ChatInterface initialized and started.")
 
+        logger.debug("Initializing ModelSelectionInterface...")
         model_selection = ModelSelectionInterface.get_instance()
-        model_selection.startup()
+        model_selection.startup() # Loads prefs
+        logger.debug("ModelSelectionInterface initialized and started.")
 
+        logger.debug("Initializing SettingsPanel...")
         settings_panel = SettingsPanel.get_instance()
-        settings_panel.startup()
+        settings_panel.startup() # Registers settings definitions
+        logger.debug("SettingsPanel initialized and started.")
 
+        logger.debug("Initializing UIManager...")
         ui_manager = UIManager.get_instance()
         main_file_dir = Path(__file__).parent
         potential_static_dir = main_file_dir / 'static'
@@ -137,12 +157,12 @@ async def main_async():
              logger.debug(f"Using static directory: {ui_manager.static_dir}")
         else:
              logger.warning(f"Static directory not found at {potential_static_dir}, using default: {ui_manager.static_dir}")
-        ui_manager.startup()
+        ui_manager.startup() # Starts web server thread
+        logger.debug("UIManager initialized and started.")
 
-        # System Manager (Assign global instance here)
-        # system_manager = SystemManager.get_instance() # Already instantiated in main()
-        # Just register components
-        if system_manager: # Check if it was successfully created in main()
+        # System Manager Registration
+        logger.debug("Registering components with SystemManager...")
+        if system_manager:
             system_manager.register_component("event_bus", event_bus)
             system_manager.register_component("config_manager", config_manager)
             system_manager.register_component("resource_monitor", resource_monitor)
@@ -155,13 +175,16 @@ async def main_async():
             system_manager.register_component("ui_manager", ui_manager)
             system_manager.startup_complete = True
             system_manager.is_running = True
+            logger.debug("Components registered.")
         else:
+             logger.error("SystemManager instance is None during component registration!")
              raise RuntimeError("SystemManager instance is unexpectedly None in main_async.")
-
+        # --- END DETAILED STARTUP LOGGING ---
 
         # Post-startup actions that require the event loop
         logger.info("Performing post-startup actions...")
         await model_selection.discover_models()
+        logger.debug("Model discovery complete.")
 
         logger.info("miniManus started successfully.")
         logger.info(f"Access the UI at http://{ui_manager.host}:{ui_manager.port}")
@@ -175,7 +198,7 @@ async def main_async():
     except Exception as e:
         logger.critical(f"Critical error during async startup: {e}", exc_info=True)
         # Ensure shutdown is attempted even if startup fails
-        # NO 'global system_manager' NEEDED HERE - already global
+        # No need for 'global system_manager' here
         if system_manager and not system_manager.is_shutting_down:
              logger.error("Attempting emergency shutdown due to startup error...")
              system_manager.shutdown(force_exit=True) # Force exit if startup failed critically
