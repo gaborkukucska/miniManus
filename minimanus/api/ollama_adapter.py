@@ -20,11 +20,23 @@ import traceback # Added for direct test traceback printing
 from typing import Dict, List, Optional, Any, Union, Tuple
 from pathlib import Path # Added for direct test
 
+# *** Add sys.path modification for direct execution ***
+if __name__ == "__main__":
+    # Add the parent directory (miniManus-main) to sys.path
+    # Assumes the script is run from the miniManus-main directory
+    current_dir = Path(__file__).parent
+    parent_dir = current_dir.parent.parent
+    sys.path.insert(0, str(parent_dir))
+    print(f"Temporarily added to sys.path: {parent_dir}")
+# *** End sys.path modification ***
+
+
 # Import local modules
 try:
-    from ..api.api_manager import APIProvider, APIRequestType # Use relative import
-    from ..core.error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
-    from ..core.config_manager import ConfigurationManager
+    from minimanus.api.api_manager import APIProvider, APIRequestType # Use absolute import now
+    from minimanus.core.error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
+    from minimanus.core.config_manager import ConfigurationManager
+    from minimanus.core.event_bus import EventBus # Needed for DummyEventBus below
 except ImportError as e:
     # Handle potential import errors during early startup or testing
     logging.getLogger("miniManus.OllamaAdapter").critical(f"Failed to import required modules: {e}", exc_info=True)
@@ -33,19 +45,66 @@ except ImportError as e:
         sys.exit(f"ImportError in ollama_adapter.py: {e}. Ensure all components exist.")
     else:
         # Define dummy classes if running directly and imports fail
+        print("ImportError occurred, defining dummy classes for direct test.")
         class DummyEnum: pass
         class APIProvider(DummyEnum): OLLAMA=1
         class APIRequestType(DummyEnum): CHAT=1
+        class ErrorCategory(DummyEnum): API = 1; NETWORK = 2
+        class ErrorSeverity(DummyEnum): WARNING = 1; ERROR = 2
+
         class DummyErrorHandler:
+             _instance = None
              def handle_error(self, *args, **kwargs): print(f"DUMMY ERROR HANDLED: {args}")
+             @classmethod
+             def get_instance(cls): # Add get_instance
+                  if cls._instance is None: cls._instance = cls()
+                  return cls._instance
+
         class DummyConfigManager:
-            def get_config(self, key, default=None): return default
+            _instance = None
+            _config = { # Simulate config structure needed by adapter
+                 "api.providers.ollama.base_url": "http://localhost:11434",
+                 "api.providers.ollama.timeout": 60,
+                 "api.providers.ollama.default_model": "llama3",
+                 "api.providers.ollama.discovery_enabled": False,
+                 "api.providers.ollama.discovery_ports": [11434],
+                 "api.providers.ollama.discovery_max_hosts": 10,
+                 "api.providers.ollama.discovery_timeout": 0.5
+             }
+            def get_config(self, key, default=None):
+                val = self._config.get(key, default)
+                # print(f"DummyConfig get: {key} -> {val}")
+                return val
             def get_api_key(self, provider): return None
+            def set_config(self, key, value): self._config[key] = value
+            @classmethod
+            def get_instance(cls): # Add get_instance
+                 if cls._instance is None: cls._instance = cls()
+                 return cls._instance
+
+        class DummyEventBus:
+             _instance = None
+             def publish_event(self, *args, **kwargs): pass
+             def startup(self): pass
+             def shutdown(self): pass
+             @classmethod
+             def get_instance(cls): # Add get_instance
+                  if cls._instance is None: cls._instance = cls()
+                  return cls._instance
+
+        # Assign dummy classes to the expected names
         ErrorHandler = DummyErrorHandler
         ConfigurationManager = DummyConfigManager
+        EventBus = DummyEventBus # Assign EventBus dummy as well
 
 
 logger = logging.getLogger("miniManus.OllamaAdapter")
+
+# --- Rest of the OllamaAdapter class remains the same as provided previously ---
+# (Class definition, __init__, base_url, _get_api_endpoint, discover..., check_availability,
+# get_available_models, _adapt_ollama_model_data, send_chat_request,
+# _adapt_ollama_chat_response, send_completion_request, _adapt_ollama_completion_response,
+# send_embedding_request, _adapt_ollama_embedding_response, send_image_request, send_audio_request)
 
 class OllamaAdapter:
     """
@@ -59,12 +118,9 @@ class OllamaAdapter:
     def __init__(self):
         """Initialize the Ollama adapter."""
         self.logger = logger
-        try:
-            self.error_handler = ErrorHandler.get_instance()
-            self.config_manager = ConfigurationManager.get_instance()
-        except NameError: # Handle case where ErrorHandler/ConfigManager might not be defined in direct test mode
-             self.error_handler = DummyErrorHandler()
-             self.config_manager = DummyConfigManager()
+        # Use get_instance for potentially dummy classes
+        self.error_handler = ErrorHandler.get_instance()
+        self.config_manager = ConfigurationManager.get_instance()
 
 
         # API configuration
@@ -76,7 +132,6 @@ class OllamaAdapter:
         )
         self.timeout = self.config_manager.get_config(
             f"api.providers.{self.provider_name}.timeout",
-            # 60 # Reduced timeout for testing
             120 # Default longer timeout for potentially slow local models
         )
         self.default_model = self.config_manager.get_config(
@@ -297,22 +352,19 @@ class OllamaAdapter:
         Asynchronously get list of available models from Ollama, using cache.
 
         Returns:
-            List of model information dictionaries, or empty list on failure.
+            List of model information dictionaries (adapted format), or empty list on failure.
         """
         # Check cache first
         current_time = time.time()
         if (self.models_cache is not None and
             current_time - self.models_cache_timestamp < self.models_cache_ttl):
             self.logger.debug(f"Returning cached models for {self.provider_name}")
-            # Need to adapt the cached data if it's not already in the desired format
-            if self.models_cache and isinstance(self.models_cache[0], dict) and "id" in self.models_cache[0]:
-                 return self.models_cache # Assume cached data is already adapted
-            else:
-                 # Re-adapt if cache format is wrong (shouldn't happen with current logic)
-                 adapted_models = [
-                    self._adapt_ollama_model_data(m) for m in self.models_cache if m
-                 ]
-                 return [m for m in adapted_models if m]
+            # Ensure cache contains adapted data
+            if self.models_cache and isinstance(self.models_cache[0], dict) and "provider" in self.models_cache[0]:
+                 return self.models_cache
+            else: # If cache contains raw data, adapt it (shouldn't happen ideally)
+                 valid_models = [self._adapt_ollama_model_data(m) for m in self.models_cache if m]
+                 return [m for m in valid_models if m]
 
 
         endpoint = self._get_api_endpoint("tags")
@@ -342,25 +394,22 @@ class OllamaAdapter:
                         return []
         except asyncio.TimeoutError:
             self.logger.error(f"Timeout fetching models from {self.provider_name}.")
-            # Use error handler if available
-            if hasattr(self, 'error_handler'):
-                 self.error_handler.handle_error(asyncio.TimeoutError("Timeout fetching models"), ErrorCategory.API, ErrorSeverity.WARNING, {"provider": self.provider_name, "action": "get_available_models"})
+            self.error_handler.handle_error(asyncio.TimeoutError("Timeout fetching models"), ErrorCategory.API, ErrorSeverity.WARNING, {"provider": self.provider_name, "action": "get_available_models"})
             return []
         except aiohttp.ClientError as e:
             self.logger.error(f"Client error fetching models from {self.provider_name}: {e}")
-            if hasattr(self, 'error_handler'):
-                self.error_handler.handle_error(e, ErrorCategory.NETWORK, ErrorSeverity.WARNING, {"provider": self.provider_name, "action": "get_available_models"})
+            self.error_handler.handle_error(e, ErrorCategory.NETWORK, ErrorSeverity.WARNING, {"provider": self.provider_name, "action": "get_available_models"})
             return []
         except Exception as e:
             self.logger.error(f"Unexpected error fetching models from {self.provider_name}: {e}", exc_info=True)
-            if hasattr(self, 'error_handler'):
-                self.error_handler.handle_error(e, ErrorCategory.API, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "get_available_models"})
+            self.error_handler.handle_error(e, ErrorCategory.API, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "get_available_models"})
             return []
 
     def _adapt_ollama_model_data(self, ollama_model_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
          """Adapts Ollama's /api/tags model format to a more common one used internally."""
          model_id = ollama_model_data.get("name")
          if not model_id:
+             self.logger.warning(f"Skipping Ollama model due to missing 'name': {ollama_model_data}")
              return None
          # Simple adaptation, can be enhanced
          return {
@@ -419,19 +468,15 @@ class OllamaAdapter:
 
         except asyncio.TimeoutError:
             self.logger.error(f"Timeout during {self.provider_name} chat request (timeout={self.timeout}s).")
-            # Use error handler if available
-            if hasattr(self, 'error_handler'):
-                self.error_handler.handle_error(asyncio.TimeoutError("Timeout during chat request"), ErrorCategory.API, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_chat_request"})
+            self.error_handler.handle_error(asyncio.TimeoutError("Timeout during chat request"), ErrorCategory.API, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_chat_request"})
             return {"error": "Request timed out."}
         except aiohttp.ClientError as e:
             self.logger.error(f"Client error during {self.provider_name} chat request: {e}")
-            if hasattr(self, 'error_handler'):
-                self.error_handler.handle_error(e, ErrorCategory.NETWORK, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_chat_request"})
+            self.error_handler.handle_error(e, ErrorCategory.NETWORK, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_chat_request"})
             return {"error": f"Network error: {e}"}
         except Exception as e:
             self.logger.error(f"Unexpected error during {self.provider_name} chat request: {e}", exc_info=True)
-            if hasattr(self, 'error_handler'):
-                self.error_handler.handle_error(e, ErrorCategory.API, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_chat_request"})
+            self.error_handler.handle_error(e, ErrorCategory.API, ErrorSeverity.ERROR, {"provider": self.provider_name, "action": "send_chat_request"})
             return {"error": f"An unexpected error occurred: {e}"}
 
     def _adapt_ollama_chat_response(self, ollama_response: Dict[str, Any]) -> Dict[str, Any]:
@@ -636,20 +681,38 @@ class OllamaAdapter:
         self.logger.warning(f"{self.provider_name} adapter does not support audio processing.")
         return {"error": "Audio processing not supported by Ollama."}
 
-# Example usage (if run directly) - ADD THIS BLOCK AT THE END
+# Example usage (if run directly) - Updated for better standalone execution
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     print("--- Running Direct Ollama Adapter Test ---")
 
     # Define dummy classes needed for standalone execution
+    # (Copied from previous response - ensuring they are defined before use)
     class DummyEnum: pass
-    class APIProvider(DummyEnum): OLLAMA = 1
-    class ErrorCategory(DummyEnum): API = 1; NETWORK = 2
-    class ErrorSeverity(DummyEnum): WARNING = 1; ERROR = 2
+    try: # Handle if APIProvider already exists from failed relative import attempt
+        if APIProvider: pass
+    except NameError:
+        class APIProvider(DummyEnum): OLLAMA=1
+    try: # Handle if ErrorCategory already exists
+        if ErrorCategory: pass
+    except NameError:
+        class ErrorCategory(DummyEnum): API = 1; NETWORK = 2
+    try: # Handle if ErrorSeverity already exists
+        if ErrorSeverity: pass
+    except NameError:
+        class ErrorSeverity(DummyEnum): WARNING = 1; ERROR = 2
+
     class DummyErrorHandler:
-        def handle_error(self, *args, **kwargs): print(f"ERROR HANDLED: {args}")
+         _instance = None
+         def handle_error(self, *args, **kwargs): print(f"DUMMY ERROR HANDLED: {args}")
+         @classmethod
+         def get_instance(cls):
+              if cls._instance is None: cls._instance = cls()
+              return cls._instance
+
     class DummyConfigManager:
-        _config = { # Simulate config structure needed by adapter
+        _instance = None
+        _config = {
              "api.providers.ollama.base_url": "http://localhost:11434",
              "api.providers.ollama.timeout": 60,
              "api.providers.ollama.default_model": "llama3",
@@ -659,22 +722,35 @@ if __name__ == "__main__":
              "api.providers.ollama.discovery_timeout": 0.5
          }
         def get_config(self, key, default=None):
-            # Simple dot notation access for the test
             val = self._config.get(key, default)
-            # print(f"DummyConfig get: {key} -> {val}") # Debug config access
             return val
         def get_api_key(self, provider): return None
-        def set_config(self, key, value): self._config[key] = value # Allow setting for test
-    class DummyEventBus:
-         def publish_event(self, *args, **kwargs): pass
+        def set_config(self, key, value): self._config[key] = value
+        @classmethod
+        def get_instance(cls):
+             if cls._instance is None: cls._instance = cls()
+             return cls._instance
 
-    # Assign dummy instances before creating the adapter instance
-    if 'ConfigurationManager' not in globals() or isinstance(ConfigurationManager, type):
-        ConfigurationManager = DummyConfigManager # Use dummy if real one wasn't imported
-    if 'ErrorHandler' not in globals() or isinstance(ErrorHandler, type):
-        ErrorHandler = DummyErrorHandler
-    if 'EventBus' not in globals() or isinstance(EventBus, type):
-        EventBus = DummyEventBus
+    class DummyEventBus:
+         _instance = None
+         def publish_event(self, *args, **kwargs): pass
+         def startup(self): pass
+         def shutdown(self): pass
+         @classmethod
+         def get_instance(cls):
+              if cls._instance is None: cls._instance = cls()
+              return cls._instance
+
+    # Ensure singletons are replaced ONLY if they weren't imported correctly
+    if 'ConfigurationManager' not in globals() or not hasattr(ConfigurationManager, 'get_instance'):
+         print("Using DummyConfigManager")
+         ConfigurationManager = DummyConfigManager
+    if 'ErrorHandler' not in globals() or not hasattr(ErrorHandler, 'get_instance'):
+         print("Using DummyErrorHandler")
+         ErrorHandler = DummyErrorHandler
+    if 'EventBus' not in globals() or not hasattr(EventBus, 'get_instance'):
+         print("Using DummyEventBus")
+         EventBus = DummyEventBus
 
     # Now create the adapter instance
     adapter = OllamaAdapter()
@@ -698,25 +774,14 @@ if __name__ == "__main__":
                 if models:
                     print("Models (Adapted Format):")
                     for m in models[:min(len(models), 5)]: # Print first few
-                        print(f"  - ID: {m.get('id')}, Name: {m.get('name')}, Metadata: {m.get('metadata')}")
+                        print(f"  - ID: {m.get('id')}, Name: {m.get('name')}, Provider: {m.get('provider')}, Metadata: {m.get('metadata')}")
                 else:
                     print("No models retrieved by adapter.")
             except Exception as e:
                  print(f"Error during get_available_models: {e}")
 
-            # Optional: Test chat if models were found
-            # model_to_test = adapter.default_model # or choose one from the list
-            # print(f"\n--- Testing Chat (Model: {model_to_test}) ---")
-            # try:
-            #      chat_data = {"model": model_to_test, "messages": [{"role": "user", "content": "Ping"}]}
-            #      response = await adapter.send_chat_request(chat_data)
-            #      print("Chat Response:")
-            #      print(json.dumps(response, indent=2))
-            # except Exception as e:
-            #      print(f"Error during send_chat_request: {e}")
-
         else:
-            print("Skipping model fetch/chat test as adapter check failed or returned False.")
+            print("Skipping model fetch test as adapter check failed or returned False.")
 
 
     # Run the async test function
