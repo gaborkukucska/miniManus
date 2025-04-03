@@ -161,10 +161,21 @@ class UIManager:
 
             def send_json_response(self, status_code: int, data: Dict[str, Any]):
                 """Helper to send JSON responses."""
-                self.send_response(status_code)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(data).encode("utf-8"))
+                # Add a check if headers are already sent (less likely with http.server but good practice)
+                # if self.headers_sent:
+                #     self.logger.warning("Attempted to send JSON response after headers were sent.")
+                #     return
+                try:
+                    self.send_response(status_code)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                except (BrokenPipeError, ConnectionResetError, OSError) as sock_err:
+                     # Catch common errors when client disconnects during response sending
+                     self.logger.warning(f"Socket error sending JSON response (client disconnected?): {sock_err}")
+                except Exception as e:
+                     self.logger.error(f"Unexpected error sending JSON response: {e}", exc_info=True)
+
 
             def send_error_response(self, status_code: int, message: str, error_details: Optional[str] = None):
                 """Helper to send JSON error responses."""
@@ -185,10 +196,13 @@ class UIManager:
                     else:
                         self._serve_static_file(path)
 
+                except (BrokenPipeError, ConnectionResetError) as client_err:
+                    self.logger.warning(f"Client connection error during GET {self.path}: {client_err}")
                 except Exception as e:
                     self.logger.error(f"GET request error for {self.path}: {e}", exc_info=True)
                     self.error_handler.handle_error(e, ErrorCategory.UI, ErrorSeverity.ERROR, {"path": self.path, "method": "GET"})
-                    self.send_error_response(500, "Internal Server Error", str(e))
+                    # Avoid sending error if headers might already be broken
+                    # self.send_error_response(500, "Internal Server Error", str(e))
 
             def _handle_api_get(self, path: str, parsed_url):
                 """Route GET API requests."""
@@ -220,38 +234,67 @@ class UIManager:
                     self.logger.error(f"Error getting settings: {e}", exc_info=True)
                     self.send_error_response(500, "Failed to retrieve settings", str(e))
 
+            # --- Updated _handle_get_models with robust error handling ---
             async def _handle_get_models(self, parsed_url):
                 """Handle GET /api/models (async)."""
+                # Added outer try block for overall safety
                 try:
                     query = parse_qs(parsed_url.query)
                     provider_name = query.get("provider", [None])[0]
                     models_info = []
+                    models_dict = [] # Initialize models_dict
 
-                    if not provider_name:
-                        models_info = await self.model_selection_interface.get_all_models()
-                    else:
-                        try:
-                            provider_enum = APIProvider[provider_name.upper()]
-                            models_info = await self.model_selection_interface.get_models_by_provider(provider_enum)
-                        except KeyError:
-                             self.send_error_response(400, f"Invalid provider name: {provider_name}")
-                             return
-                        except Exception as e:
-                            self.logger.error(f"Error getting models for provider {provider_name}: {e}", exc_info=True)
-                            self.send_error_response(500, f"Failed to retrieve models for {provider_name}", str(e))
-                            return
+                    # Log entry
+                    self.logger.debug(f"Handling GET /api/models?provider={provider_name}")
 
-                    models_dict = [m.to_dict() for m in models_info]
-                    self.send_json_response(200, {"models": models_dict})
-                except Exception as e:
-                    # Catch errors within the async handler
-                    self.logger.error(f"Async error handling GET /api/models: {e}", exc_info=True)
-                    # Ensure response is sent even on internal errors
-                    # Need to be careful here, headers might already be sent by underlying library on socket errors
+                    # Inner try block for the async operation
                     try:
-                        self.send_error_response(500, "Internal server error processing models request.")
-                    except: # Catch potential errors sending the error response itself
-                         self.logger.error("Failed to send error response for GET /api/models.")
+                        if not provider_name:
+                            models_info = await self.model_selection_interface.get_all_models()
+                        else:
+                            try:
+                                provider_enum = APIProvider[provider_name.upper()]
+                                models_info = await self.model_selection_interface.get_models_by_provider(provider_enum)
+                            except KeyError:
+                                # Send error response within the async context if possible
+                                self.send_error_response(400, f"Invalid provider name: {provider_name}")
+                                return # Exit async function
+                            # Catch potential errors during model fetching itself
+                            except Exception as model_fetch_error:
+                                self.logger.error(f"Error getting models for provider {provider_name}: {model_fetch_error}", exc_info=True)
+                                self.send_error_response(500, f"Failed to retrieve models for {provider_name}", str(model_fetch_error))
+                                return # Exit async function
+
+                        # Convert to dict *after* successful fetch
+                        models_dict = [m.to_dict() for m in models_info]
+                        self.logger.debug(f"Successfully fetched {len(models_dict)} models for provider '{provider_name or 'all'}'.")
+
+                    except Exception as e:
+                        # Catch errors from await calls or model processing
+                        self.logger.error(f"Async error handling GET /api/models internal logic: {e}", exc_info=True)
+                        self.send_error_response(500, "Internal server error processing models request.", str(e))
+                        return # Exit async function
+
+                    # Try sending the response, catching socket errors
+                    try:
+                         self.send_json_response(200, {"models": models_dict})
+                         self.logger.debug(f"Sent model list response for provider '{provider_name or 'all'}'.")
+                    except OSError as ose:
+                         if ose.errno == 9: # Bad file descriptor
+                             self.logger.warning(f"Socket closed before sending response for GET /api/models (OSError 9). Request likely interrupted.")
+                         else:
+                             self.logger.error(f"OSError sending response for GET /api/models: {ose}", exc_info=True)
+                             # Avoid sending another error if socket is already broken
+                    except Exception as send_e:
+                         self.logger.error(f"Exception sending response for GET /api/models: {send_e}", exc_info=True)
+                         # Avoid sending another error if socket is already broken
+
+                except Exception as outer_e:
+                    # Catch any unexpected error in the overall handler logic
+                    self.logger.error(f"Unexpected outer error in _handle_get_models: {outer_e}", exc_info=True)
+                    # Avoid sending response here if inner sending failed or socket is broken
+
+            # --- End of Updated _handle_get_models ---
 
 
             def _handle_get_sessions(self):
@@ -270,7 +313,7 @@ class UIManager:
                 """Handle POST requests."""
                 loop = self.ui_manager.get_event_loop() # Get the main loop
                 if not loop or not loop.is_running():
-                    self.logger.error("Event loop not available for async POST handler.")
+                    self.logger.error("Event loop not available for POST handler.")
                     self.send_error_response(500, "Internal server error: Event loop unavailable")
                     return
 
@@ -291,7 +334,7 @@ class UIManager:
                             return
 
                     if path == "/api/settings":
-                        self._handle_post_settings(body) # Keep settings save synchronous for now
+                        self._handle_post_settings(body) # Keep settings save synchronous
                     elif path == "/api/chat":
                         self._handle_post_chat(body) # This uses run_coroutine_threadsafe
                     elif path == "/api/discover_models":
@@ -301,18 +344,21 @@ class UIManager:
                     else:
                         self.send_error_response(404, "API endpoint not found")
 
+                except (BrokenPipeError, ConnectionResetError) as client_err:
+                    self.logger.warning(f"Client connection error during POST {self.path}: {client_err}")
                 except Exception as e:
                     self.logger.error(f"POST request error for {self.path}: {e}", exc_info=True)
                     self.error_handler.handle_error(e, ErrorCategory.UI, ErrorSeverity.ERROR, {"path": self.path, "method": "POST"})
-                    try:
-                        self.send_error_response(500, "Internal Server Error", str(e))
-                    except:
-                         self.logger.error("Failed to send error response for POST request.")
+                    # Avoid sending error if socket is likely broken
+                    # try:
+                    #     self.send_error_response(500, "Internal Server Error", str(e))
+                    # except:
+                    #      self.logger.error("Failed to send error response for POST request.")
 
 
             def _handle_post_settings(self, body):
                 """Handle POST /api/settings."""
-                # *** ADDED DETAILED LOGGING HERE ***
+                # Using previous version with detailed logging
                 self.logger.info("Received POST /api/settings request.")
                 try:
                     # Separate API keys from regular settings
@@ -385,7 +431,7 @@ class UIManager:
                          self.send_error_response(500, "Failed to update settings", str(e))
                     except:
                          self.logger.error("Failed to send error response for POST /api/settings.")
-                # *** END OF ADDED LOGGING ***
+
 
             def _handle_post_chat(self, body):
                 """Handle POST /api/chat."""
@@ -427,15 +473,32 @@ class UIManager:
             async def _handle_discover_models(self):
                  """Handle POST /api/discover_models (async)."""
                  try:
+                     self.logger.info("Received request to discover models.")
                      await self.model_selection_interface.discover_models()
-                     self.send_json_response(200, {"status": "success", "message": "Model discovery initiated."})
+                     self.logger.info("Model discovery initiated successfully.")
+                     # Send response back from the async handler
+                     try:
+                         self.send_json_response(200, {"status": "success", "message": "Model discovery initiated."})
+                     except OSError as ose:
+                         if ose.errno == 9: # Bad file descriptor
+                             self.logger.warning(f"Socket closed before sending discovery response (OSError 9).")
+                         else:
+                             self.logger.error(f"OSError sending discovery response: {ose}", exc_info=True)
+                     except Exception as send_e:
+                         self.logger.error(f"Exception sending discovery response: {send_e}", exc_info=True)
+
                  except Exception as e:
                      self.logger.error(f"Error initiating model discovery: {e}", exc_info=True)
-                     # Ensure response is sent even on internal errors
+                     # Try sending error response, catching potential socket errors
                      try:
-                          self.send_error_response(500, "Failed to start model discovery", str(e))
-                     except:
-                          self.logger.error("Failed to send error response for POST /api/discover_models.")
+                         self.send_error_response(500, "Failed to start model discovery", str(e))
+                     except OSError as ose_err:
+                         if ose_err.errno == 9:
+                              self.logger.warning(f"Socket closed before sending discovery error response (OSError 9).")
+                         else:
+                              self.logger.error(f"OSError sending discovery error response: {ose_err}", exc_info=True)
+                     except Exception as send_err_e:
+                          self.logger.error(f"Exception sending discovery error response: {send_err_e}", exc_info=True)
 
 
             # --- Static File Serving ---
@@ -475,6 +538,8 @@ class UIManager:
                     self.end_headers()
                     with file_path.open("rb") as f:
                         self.wfile.write(f.read())
+                except (BrokenPipeError, ConnectionResetError) as client_err:
+                     self.logger.warning(f"Client connection error serving static file {file_path}: {client_err}")
                 except Exception as e:
                     self.logger.error(f"Error serving static file {file_path}: {e}", exc_info=True)
                     self.error_handler.handle_error(e, ErrorCategory.UI, ErrorSeverity.ERROR, {"path": path, "file_path": str(file_path)})
