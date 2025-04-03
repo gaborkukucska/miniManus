@@ -1,3 +1,4 @@
+# START OF FILE miniManus-main/minimanus/core/agent_system.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -17,6 +18,7 @@ import asyncio
 import re
 import traceback
 from typing import Dict, List, Optional, Any, Union, Callable, Coroutine, Tuple
+from pathlib import Path # Added
 
 # Import local modules
 try:
@@ -114,9 +116,10 @@ class AgentSystem:
         self._register_default_capabilities()
 
         # Agent configuration
-        self.max_iterations = self.config_manager.get_config("agent.max_iterations", 5) # Max planning/execution cycles
+        self.max_iterations = self.config_manager.get_config("agent.max_iterations", 5)
+        # Store the name of the default provider, not the model directly
         self.default_provider_name = self.config_manager.get_config("agent.default_provider", "openrouter")
-        self.default_model_name = self.config_manager.get_config(f"api.{self.default_provider_name}.default_model") # Read default from provider config
+        # We get the actual default model from the provider config when needed
 
         # System prompt can be customized
         self.system_prompt = self._get_default_system_prompt()
@@ -138,38 +141,14 @@ class AgentSystem:
         # --- File Read ---
         self.register_capability(AgentCapability(
             name="read_file",
-            description="Read the content of a specified file.",
+            description="Read the content of a specified file within the allowed directory.",
             parameters={
-                "filepath": {"type": "string", "description": "The relative or absolute path to the file.", "required": True}
+                "filepath": {"type": "string", "description": "The relative path to the file within the allowed directory.", "required": True}
             },
             handler=self._capability_read_file
         ))
 
-        # --- File Write ---
-        # WARNING: Writing files agentically is a significant security risk.
-        # Enable with extreme caution and implement strict sandboxing/validation.
-        # self.register_capability(AgentCapability(
-        #     name="write_file",
-        #     description="Write content to a specified file. Use with caution, overwrites existing files.",
-        #     parameters={
-        #         "filepath": {"type": "string", "description": "The relative or absolute path to the file.", "required": True},
-        #         "content": {"type": "string", "description": "The content to write to the file.", "required": True}
-        #     },
-        #     handler=self._capability_write_file
-        # ))
-
-        # --- Code Execution ---
-        # WARNING: Executing code agentically is extremely dangerous.
-        # Requires robust sandboxing (e.g., Docker containers, restricted environments).
-        # Placeholder implementation only. DO NOT USE IN PRODUCTION WITHOUT SANDBOXING.
-        # self.register_capability(AgentCapability(
-        #     name="execute_code",
-        #     description="Execute Python code in a restricted environment. ONLY use for simple calculations or data manipulation.",
-        #     parameters={
-        #         "code": {"type": "string", "description": "The Python code to execute.", "required": True}
-        #     },
-        #     handler=self._capability_execute_code
-        # ))
+        # --- Add other capabilities here with strong security considerations ---
 
         self.logger.info(f"Registered {len(self.capabilities)} default capabilities.")
 
@@ -182,17 +161,18 @@ class AgentSystem:
 
     def _get_default_system_prompt(self) -> str:
         """Get the default system prompt for the agent."""
-        # Base prompt - can be overridden by config or session settings
         base_prompt = """You are miniManus, a helpful AI assistant running in a mobile environment (Termux on Android).
 Your goal is to understand the user's request, plan the necessary steps, use available tools (capabilities) when needed, and provide a comprehensive final answer.
 Be concise but complete. Explain your reasoning briefly if the task is complex.
 Prioritize resource efficiency (network usage, computation) due to the mobile environment."""
 
-        # Append available tools dynamically
         if self.capabilities:
             tools_description = "\n\nAvailable Tools:\n"
             for name, cap in self.capabilities.items():
-                tools_description += f"- {name}: {cap.description}\n"
+                # Generate schema dynamically for the prompt
+                params = cap.parameters
+                param_desc = ", ".join([f"{p_name} ({details.get('type', 'string')})" for p_name, details in params.items()])
+                tools_description += f"- {name}({param_desc}): {cap.description}\n"
             return base_prompt + tools_description
         else:
             return base_prompt + "\n\nNo specific tools are currently available."
@@ -206,41 +186,36 @@ Prioritize resource efficiency (network usage, computation) due to the mobile en
     def _determine_request_complexity(self, user_message: str, history_length: int) -> bool:
         """
         Heuristic to determine if a request likely requires agentic capabilities.
-        More sophisticated analysis could be done by an LLM call if needed.
         """
-        # Keywords suggesting tool use or planning
         agent_keywords = [
             "search", "find", "look up", "research", "google", "browse",
             "create", "make", "build", "develop", "write code", "program", "script",
             "analyze", "examine", "investigate", "calculate", "compute", "solve",
-            "file", "save", "read", "list directory", # Add specific file ops if implemented
+            "file", "save", "read", "list directory",
             "step by step", "plan", "organize", "how to",
-            "latest", "current", "real-time", "update", # Often need search
+            "latest", "current", "real-time", "update",
         ]
         message_lower = user_message.lower()
         if any(re.search(r'\b' + re.escape(keyword) + r'\b', message_lower) for keyword in agent_keywords):
             return True
 
-        # Longer messages or conversations might indicate complexity
         if len(user_message.split()) > 25 or history_length > 4:
             return True
 
-        # Questions that imply external knowledge beyond training data
         if re.search(r'\b(what is|who is|when did|current|latest)\b', message_lower):
-             # Very basic check, could be improved
-             # Check if it looks like a request for recent info
-             if not re.search(r'\b(your name|you are|your purpose)\b', message_lower): # Exclude self-referential questions
+             if not re.search(r'\b(your name|you are|your purpose)\b', message_lower):
                  return True
 
-        return False # Assume simple request otherwise
+        return False
 
-    async def process_user_request(self, user_message: str, conversation_history: List[Dict[str, str]]) -> str:
+    async def process_user_request(self, user_message: str, conversation_history: List[Dict[str, str]], requested_model_id: Optional[str] = None) -> str:
         """
         Processes a user request, deciding whether to use agentic capabilities or respond directly.
 
         Args:
             user_message: The latest message from the user.
             conversation_history: Formatted list of previous messages (including system prompt if any).
+            requested_model_id: The model ID preferred for this request (e.g., from session).
 
         Returns:
             The final response string for the user.
@@ -248,8 +223,8 @@ Prioritize resource efficiency (network usage, computation) due to the mobile en
         if self._determine_request_complexity(user_message, len(conversation_history)):
             self.logger.info("Complex request detected, engaging agentic loop.")
             try:
-                # The agentic loop handles LLM calls internally via APIManager
-                return await self._agentic_loop(conversation_history + [{"role": "user", "content": user_message}])
+                # Pass the requested model ID to the agentic loop
+                return await self._agentic_loop(conversation_history + [{"role": "user", "content": user_message}], requested_model_id)
             except Exception as e:
                 self.logger.error(f"Error during agentic processing: {e}", exc_info=True)
                 self.error_handler.handle_error(e, ErrorCategory.SYSTEM, ErrorSeverity.ERROR, {"action": "agentic_loop"})
@@ -257,12 +232,22 @@ Prioritize resource efficiency (network usage, computation) due to the mobile en
         else:
             self.logger.info("Simple request detected, responding directly.")
             try:
-                # Make a direct LLM call via APIManager
+                # Determine model for direct call (use requested or default provider's default)
+                model_to_use = requested_model_id
+                if not model_to_use:
+                     default_provider = self.config_manager.get_config("api.default_provider", "openrouter")
+                     model_to_use = self.config_manager.get_config(f"api.providers.{default_provider}.default_model")
+                     self.logger.debug(f"Using default provider's model '{model_to_use}' for direct call.")
+
+                if not model_to_use: # Final fallback if config is missing
+                    model_to_use = "openai/gpt-3.5-turbo" # A known common model as last resort
+                    self.logger.warning(f"Using hardcoded fallback model '{model_to_use}' for direct call.")
+
                 messages_for_llm = conversation_history + [{"role": "user", "content": user_message}]
                 response_data = await self.api_manager.send_request(
                     request_type=APIRequestType.CHAT,
-                    request_data={"model": self.default_model_name, "messages": messages_for_llm}
-                    # Add other params like temperature if needed
+                    request_data={"model": model_to_use, "messages": messages_for_llm}
+                    # Consider passing preferred_provider based on model_to_use if possible
                 )
 
                 if "error" in response_data:
@@ -279,12 +264,15 @@ Prioritize resource efficiency (network usage, computation) due to the mobile en
                 return f"Sorry, I encountered an error contacting the language model: {type(e).__name__}"
 
 
-    async def _agentic_loop(self, messages: List[Dict[str, str]]) -> str:
+    async def _agentic_loop(self, messages: List[Dict[str, str]], requested_model_id: Optional[str] = None) -> str:
         """
         The core loop for handling complex requests using planning and tool execution.
+        Uses the requested_model_id or falls back appropriately.
         """
         current_messages = list(messages) # Work on a copy
         iterations = 0
+        last_used_provider: Optional[APIProvider] = None # Track the provider used
+        last_used_model: Optional[str] = requested_model_id # Start with requested
 
         while iterations < self.max_iterations:
             iterations += 1
@@ -293,33 +281,60 @@ Prioritize resource efficiency (network usage, computation) due to the mobile en
             # --- Prepare Tools for LLM ---
             tools = [cap.get_tool_schema() for cap in self.capabilities.values()]
 
+            # --- Determine Model for this Iteration ---
+            # Priority: last_used_model (if valid) -> requested_model_id -> agent_default -> hardcoded fallback
+            model_to_use_this_iteration = last_used_model if last_used_model else requested_model_id
+
+            if not model_to_use_this_iteration:
+                 # Fallback to agent's default provider's default model
+                 fallback_provider_name = self.config_manager.get_config("agent.default_provider", self.default_provider_name)
+                 model_to_use_this_iteration = self.config_manager.get_config(f"api.providers.{fallback_provider_name}.default_model")
+                 self.logger.debug(f"Using agent's default model: {model_to_use_this_iteration} from provider {fallback_provider_name}")
+
+            if not model_to_use_this_iteration:
+                 # Absolute fallback if everything else fails
+                 model_to_use_this_iteration = "openai/gpt-3.5-turbo" # Should be configured better
+                 self.logger.error(f"CRITICAL FALLBACK: Using hardcoded model {model_to_use_this_iteration} as no other model could be determined.")
+
+            self.logger.info(f"Agent loop using model: {model_to_use_this_iteration}")
+
             # --- Call LLM for Planning/Action ---
             request_data = {
-                "model": self.default_model_name,
+                "model": model_to_use_this_iteration,
                 "messages": current_messages,
                 "tools": tools,
-                "tool_choice": "auto" # Let the model decide whether to use a tool
+                "tool_choice": "auto"
             }
-            llm_response_data = await self.api_manager.send_request(APIRequestType.CHAT, request_data)
 
+            # APIManager's send_request will select the provider based on availability and preferences.
+            # It will use the effective_model_name determined within it (which prioritizes the one in request_data).
+            llm_response_data = await self.api_manager.send_request(
+                request_type=APIRequestType.CHAT,
+                request_data=request_data
+                # We could try to infer preferred_provider from model_to_use_this_iteration, but let APIManager handle it.
+            )
+
+            # --- Process Response ---
             if "error" in llm_response_data:
-                self.logger.error(f"LLM call failed in agent loop: {llm_response_data['error']}")
-                # Attempt to generate a final response without tools based on current history
-                return await self._generate_final_response(current_messages, f"LLM Error: {llm_response_data['error']}")
+                self.logger.error(f"LLM call failed in agent loop (Model: {model_to_use_this_iteration}): {llm_response_data['error']}")
+                # Pass the model that failed to the final response generator
+                return await self._generate_final_response(current_messages, f"LLM Error: {llm_response_data['error']}", model_to_use_this_iteration)
+
+            # Update last used model based on response (if available)
+            last_used_model = llm_response_data.get("model", model_to_use_this_iteration)
+            # TODO: Get provider used from APIManager response if possible
 
             assistant_message = llm_response_data.get("choices", [{}])[0].get("message")
 
             if not assistant_message:
                 self.logger.warning("LLM response missing message content in agent loop.")
-                return await self._generate_final_response(current_messages, "Received empty response from LLM.")
+                return await self._generate_final_response(current_messages, "Received empty response from LLM.", last_used_model)
 
-            # Append assistant's thought process/message to history
             current_messages.append(assistant_message)
 
             # --- Check for Tool Calls ---
             tool_calls = assistant_message.get("tool_calls")
             if not tool_calls:
-                # LLM decided no tool is needed, or it's providing the final answer
                 self.logger.info("LLM provided a response without tool calls. Ending loop.")
                 return assistant_message.get("content", "I have completed the task.")
 
@@ -327,20 +342,18 @@ Prioritize resource efficiency (network usage, computation) due to the mobile en
             self.logger.info(f"LLM requested {len(tool_calls)} tool call(s).")
             tool_results = await self._execute_tool_calls(tool_calls)
 
-            # Append tool results to message history
             for result in tool_results:
                  current_messages.append({
                       "tool_call_id": result["tool_call_id"],
                       "role": "tool",
                       "name": result["name"],
-                      "content": result["content"], # Content is the result string
+                      "content": result["content"],
                  })
-
-            # --- Loop continues: LLM will process tool results in the next iteration ---
+            # Loop continues...
 
         # Max iterations reached
         self.logger.warning(f"Agent loop reached max iterations ({self.max_iterations}). Generating final response.")
-        return await self._generate_final_response(current_messages, f"Reached maximum processing steps ({self.max_iterations}).")
+        return await self._generate_final_response(current_messages, f"Reached maximum processing steps ({self.max_iterations}).", last_used_model)
 
 
     async def _execute_tool_calls(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -367,14 +380,12 @@ Prioritize resource efficiency (network usage, computation) due to the mobile en
 
             capability = self.capabilities[tool_name]
             try:
-                # Parse arguments safely
                 arguments_str = function_call.get("arguments", "{}")
                 arguments = json.loads(arguments_str)
                 if not isinstance(arguments, dict):
                      raise ValueError("Arguments must be a JSON object.")
 
                 self.logger.info(f"Executing tool '{tool_name}' with args: {arguments}")
-                # Schedule the handler execution
                 tasks.append(self._run_capability(capability, arguments, tool_call_id))
 
             except json.JSONDecodeError:
@@ -388,32 +399,27 @@ Prioritize resource efficiency (network usage, computation) due to the mobile en
                  results.append({ "tool_call_id": tool_call_id, "name": tool_name, "content": f"Error: Unexpected error preparing tool call." })
 
 
-        # Execute capability handlers concurrently
         if tasks:
             task_results = await asyncio.gather(*tasks)
-            results.extend(task_results) # Add results from successful/failed async tasks
+            results.extend(task_results)
 
         return results
 
     async def _run_capability(self, capability: AgentCapability, args: Dict[str, Any], tool_call_id: str) -> Dict[str, str]:
          """Safely runs a single capability handler."""
          try:
-             # Basic validation (could be enhanced)
              required_params = [p for p, d in capability.parameters.items() if d.get("required")]
              missing = [p for p in required_params if p not in args]
              if missing:
                  return {"tool_call_id": tool_call_id, "name": capability.name, "content": f"Error: Missing required arguments: {', '.join(missing)}"}
 
-             # Execute the async handler
              result = await capability.handler(**args)
 
-             # Convert result to string for the LLM
              if isinstance(result, (dict, list)):
                  result_content = json.dumps(result, indent=2)
              else:
                  result_content = str(result)
 
-             # Truncate long results if necessary
              max_result_len = 2000 # Example limit
              if len(result_content) > max_result_len:
                   result_content = result_content[:max_result_len] + "\n... [Result Truncated]"
@@ -423,24 +429,36 @@ Prioritize resource efficiency (network usage, computation) due to the mobile en
          except Exception as e:
              self.logger.error(f"Error executing tool '{capability.name}': {e}", exc_info=True)
              self.error_handler.handle_error(e, ErrorCategory.PLUGIN, ErrorSeverity.ERROR, {"capability": capability.name, "args": args})
-             # Return error message as content
              return {"tool_call_id": tool_call_id, "name": capability.name, "content": f"Error executing tool: {type(e).__name__} - {e}"}
 
 
-    async def _generate_final_response(self, messages: List[Dict[str, str]], reason: str) -> str:
+    async def _generate_final_response(self, messages: List[Dict[str, str]], reason: str, model_id: Optional[str] = None) -> str:
         """
         Makes a final LLM call without tools to summarize results or explain failure.
+        Uses the provided model_id or falls back to agent default.
         """
         self.logger.info(f"Generating final response. Reason: {reason}")
-        # Add a final instruction to the LLM
+
         final_instruction = f"Based on the preceding conversation and tool results (if any), please provide a comprehensive final answer to the initial user request. Reason for concluding: {reason}"
         messages.append({"role": "user", "content": final_instruction})
+
+        # Determine model for final call
+        model_to_use = model_id
+        if not model_to_use:
+             fallback_provider_name = self.config_manager.get_config("agent.default_provider", self.default_provider_name)
+             model_to_use = self.config_manager.get_config(f"api.providers.{fallback_provider_name}.default_model")
+             self.logger.warning(f"Falling back to agent's default model for final response: {model_to_use}")
+        if not model_to_use:
+            model_to_use = "openai/gpt-3.5-turbo" # Absolute fallback
+            self.logger.error(f"CRITICAL FALLBACK: Using hardcoded model {model_to_use} for final response.")
+
+        self.logger.info(f"Generating final response using model: {model_to_use}")
 
         try:
             response_data = await self.api_manager.send_request(
                 request_type=APIRequestType.CHAT,
                 request_data={
-                    "model": self.default_model_name,
+                    "model": model_to_use,
                     "messages": messages,
                     # No tools parameter here
                 }
@@ -466,21 +484,8 @@ Prioritize resource efficiency (network usage, computation) due to the mobile en
     async def _capability_web_search(self, query: str) -> Dict[str, Any]:
         """Placeholder: Performs a web search."""
         self.logger.info(f"Executing placeholder web search for: {query}")
-        # In a real implementation:
-        # 1. Choose a search API (Google Search API, Bing Search API, SerpApi, SearXNG instance, etc.)
-        # 2. Get API key/URL from config.
-        # 3. Make the HTTP request using aiohttp.
-        # 4. Parse the results.
-        # 5. Format results concisely (e.g., list of snippets or summaries).
-        # 6. Handle errors (network errors, API errors, no results).
-        # Example structure:
-        # try:
-        #     results = await perform_actual_web_search(query) # Your async search function
-        #     return {"status": "success", "results": results[:3]} # Return top 3 results
-        # except Exception as e:
-        #     return {"status": "error", "message": f"Web search failed: {str(e)}"}
-
-        # Placeholder result:
+        # In a real implementation: Use libraries like 'requests'/'aiohttp' + 'beautifulsoup4'
+        # or dedicated search APIs (SerpApi, Google Search API etc.)
         await asyncio.sleep(0.5) # Simulate network delay
         return {
             "status": "success",
@@ -493,28 +498,37 @@ Prioritize resource efficiency (network usage, computation) due to the mobile en
     async def _capability_read_file(self, filepath: str) -> Dict[str, Any]:
         """Placeholder: Reads a file."""
         self.logger.info(f"Executing placeholder file read for: {filepath}")
-        # SECURITY: VERY IMPORTANT - Sanitize the filepath. Prevent directory traversal ('..').
+        # SECURITY: VERY IMPORTANT - Sanitize filepath. Prevent directory traversal ('..').
         # Only allow access within a specific, restricted base directory.
-        allowed_base_dir = Path(self.config_manager.get_config("agent.files.allowed_read_dir", str(Path.home() / "minimanus_files"))).resolve()
-        target_path = (allowed_base_dir / filepath).resolve()
-
-        if not str(target_path).startswith(str(allowed_base_dir)):
-            self.logger.warning(f"Attempted file read outside allowed directory: {filepath}")
-            return {"status": "error", "message": "Access denied: File path is outside allowed directory."}
-
         try:
+            allowed_base_dir_str = self.config_manager.get_config("agent.files.allowed_read_dir")
+            if not allowed_base_dir_str:
+                return {"status": "error", "message": "File reading is disabled (no allowed directory configured)."}
+
+            allowed_base_dir = Path(allowed_base_dir_str).resolve()
+            # Resolve the combined path safely
+            target_path = (allowed_base_dir / filepath).resolve()
+
+            # Check if the resolved path is still within the allowed base directory
+            if not str(target_path).startswith(str(allowed_base_dir)):
+                self.logger.warning(f"Attempted file read outside allowed directory: {filepath} -> {target_path}")
+                return {"status": "error", "message": "Access denied: File path is outside allowed directory."}
+
             if not target_path.is_file():
                 return {"status": "error", "message": f"File not found: {filepath}"}
 
-            # Limit file size read?
-            max_read_bytes = 10000 # Example limit
+            # Limit file size read
+            max_read_bytes = 10000
             content = target_path.read_text(encoding='utf-8', errors='ignore')[:max_read_bytes]
-            if len(content) == max_read_bytes: content += "\n... [File Truncated]"
+            if len(content) >= max_read_bytes:
+                 content += "\n... [File Truncated]"
 
             return {"status": "success", "filepath": filepath, "content": content}
+        except ValueError as ve: # Handle errors from Path construction if needed
+             self.logger.error(f"Invalid path specified for file read: {filepath} - {ve}")
+             return {"status": "error", "message": f"Invalid file path specified: {ve}"}
         except Exception as e:
             self.logger.error(f"Error reading file {filepath}: {e}", exc_info=True)
             return {"status": "error", "message": f"Failed to read file: {str(e)}"}
 
-    # --- Add _capability_write_file and _capability_execute_code here if needed ---
-    # --- REMEMBER THE SECURITY WARNINGS ---
+# END OF FILE miniManus-main/minimanus/core/agent_system.py
