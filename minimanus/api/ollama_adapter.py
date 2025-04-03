@@ -1,3 +1,4 @@
+# START OF FILE miniManus-main/minimanus/api/ollama_adapter.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -431,16 +432,24 @@ class OllamaAdapter:
         Returns:
             Dictionary with the API response (adapted) or an error dictionary.
         """
-        required_fields = ["model", "messages"]
+        required_fields = ["messages"] # Model is now optional in request_data
         if not all(field in request_data for field in required_fields):
             return {"error": f"Missing required fields for Ollama chat request: {required_fields}"}
 
+        # *** MODIFIED PAYLOAD ***
         payload = {
-            "model": request_data["model"],
+            # Use model from request_data if provided, otherwise use adapter's default
+            "model": request_data.get("model", self.default_model),
             "messages": request_data["messages"],
             "stream": request_data.get("stream", False),
             "options": request_data.get("options", {}) # Pass options dict directly
         }
+
+        # Ensure model is not empty before sending
+        if not payload["model"]:
+             self.logger.error("Ollama chat request cannot proceed: model name is empty.")
+             return {"error": "Model name is required but was empty."}
+
         # Add common parameters to options if not already present
         if "temperature" not in payload["options"] and request_data.get("temperature") is not None:
              payload["options"]["temperature"] = request_data["temperature"]
@@ -463,7 +472,8 @@ class OllamaAdapter:
                         return self._adapt_ollama_chat_response(ollama_response)
                     else:
                         error_text = await response.text()
-                        self.logger.error(f"Ollama chat request failed: {response.status} - {error_text}")
+                        # Log the payload that caused the error for debugging
+                        self.logger.error(f"Ollama chat request failed: {response.status} - {error_text}. Payload: {payload}")
                         return {"error": f"API Error ({response.status}): {error_text}"}
 
         except asyncio.TimeoutError:
@@ -525,12 +535,12 @@ class OllamaAdapter:
         Returns:
             Dictionary with the API response (adapted) or an error dictionary.
         """
-        required_fields = ["model", "prompt"]
+        required_fields = ["prompt"] # Model is optional
         if not all(field in request_data for field in required_fields):
             return {"error": f"Missing required fields for Ollama completion request: {required_fields}"}
 
         payload = {
-            "model": request_data["model"],
+            "model": request_data.get("model", self.default_model), # Use default if needed
             "prompt": request_data["prompt"],
             "stream": request_data.get("stream", False),
             "options": request_data.get("options", {}),
@@ -539,6 +549,10 @@ class OllamaAdapter:
             "context": request_data.get("context") # Pass context if provided
         }
         payload = {k: v for k, v in payload.items() if v is not None} # Clean None values
+
+        if not payload["model"]:
+             self.logger.error("Ollama completion request cannot proceed: model name is empty.")
+             return {"error": "Model name is required but was empty."}
 
         endpoint = self._get_api_endpoint("generate")
         try:
@@ -551,7 +565,7 @@ class OllamaAdapter:
                         return self._adapt_ollama_completion_response(ollama_response)
                     else:
                         error_text = await response.text()
-                        self.logger.error(f"Ollama completion request failed: {response.status} - {error_text}")
+                        self.logger.error(f"Ollama completion request failed: {response.status} - {error_text}. Payload: {payload}")
                         return {"error": f"API Error ({response.status}): {error_text}"}
 
         except asyncio.TimeoutError:
@@ -606,19 +620,23 @@ class OllamaAdapter:
         Returns:
             Dictionary with the API response (adapted) or an error dictionary.
         """
-        required_fields = ["model", "prompt"] # Ollama uses 'prompt' for input text
-        if not all(field in request_data for field in required_fields):
-            # Adapt: if 'input' is provided instead of 'prompt', use it
-            if "input" in request_data and "prompt" not in request_data:
-                request_data["prompt"] = request_data["input"]
-            else:
-                return {"error": f"Missing required field 'prompt' for Ollama embedding request."}
+        required_fields = ["prompt"] # Ollama uses 'prompt' for input text, model is optional
+        if "input" in request_data and "prompt" not in request_data:
+             request_data["prompt"] = request_data["input"] # Adapt if 'input' is provided
+        elif "prompt" not in request_data:
+             return {"error": f"Missing required field 'prompt' (or 'input') for Ollama embedding request."}
+
 
         payload = {
-            "model": request_data["model"],
+            "model": request_data.get("model", self.default_model), # Use default if needed
             "prompt": request_data["prompt"],
             "options": request_data.get("options", {}) # Pass options if provided
         }
+
+        if not payload["model"]:
+             self.logger.error("Ollama embedding request cannot proceed: model name is empty.")
+             return {"error": "Model name is required but was empty."}
+
 
         endpoint = self._get_api_endpoint("embeddings")
         try:
@@ -628,10 +646,10 @@ class OllamaAdapter:
                     if response.status == 200:
                         ollama_response = await response.json()
                         # Adapt response
-                        return self._adapt_ollama_embedding_response(ollama_response, request_data["model"])
+                        return self._adapt_ollama_embedding_response(ollama_response, payload["model"]) # Pass model name
                     else:
                         error_text = await response.text()
-                        self.logger.error(f"Ollama embedding request failed: {response.status} - {error_text}")
+                        self.logger.error(f"Ollama embedding request failed: {response.status} - {error_text}. Payload: {payload}")
                         return {"error": f"API Error ({response.status}): {error_text}"}
 
         except asyncio.TimeoutError:
@@ -757,6 +775,8 @@ if __name__ == "__main__":
 
     async def test_ollama_adapter_direct():
         print(f"Adapter Base URL: {adapter.base_url}")
+        print(f"Adapter Default Model: {adapter.default_model}")
+
 
         print("\n--- Checking Availability ---")
         try:
@@ -768,6 +788,7 @@ if __name__ == "__main__":
 
         if is_available:
             print("\n--- Getting Available Models ---")
+            models = [] # Initialize
             try:
                 models = await adapter.get_available_models()
                 print(f"Adapter found {len(models)} models.")
@@ -780,8 +801,26 @@ if __name__ == "__main__":
             except Exception as e:
                  print(f"Error during get_available_models: {e}")
 
+            # --- Test Chat Request ---
+            print("\n--- Testing Chat Request ---")
+            if models:
+                chat_model_to_use = models[0]['id'] # Use the first discovered model
+                print(f"Using model: {chat_model_to_use}")
+                chat_data = {
+                    "model": chat_model_to_use, # Explicitly provide model
+                    "messages": [{"role": "user", "content": "Why is the sky blue?"}]
+                }
+                try:
+                    chat_response = await adapter.send_chat_request(chat_data)
+                    print("Chat Response (Adapted):")
+                    print(json.dumps(chat_response, indent=2))
+                except Exception as e:
+                    print(f"Error during send_chat_request: {e}")
+            else:
+                print("Skipping chat test - no models available.")
+
         else:
-            print("Skipping model fetch test as adapter check failed or returned False.")
+            print("Skipping further tests as adapter check failed or returned False.")
 
 
     # Run the async test function
@@ -792,3 +831,4 @@ if __name__ == "__main__":
         traceback.print_exc()
 
     print("\n--- Direct Ollama Adapter Test Finished ---")
+# END OF FILE miniManus-main/minimanus/api/ollama_adapter.py
